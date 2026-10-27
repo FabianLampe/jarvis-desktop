@@ -1,158 +1,83 @@
-# J.A.R.V.I.S. — Desktop-App (Orb-Front)
+# jarvis-desktop
 
-Native Desktop-App im Stil der J.A.R.V.I.S.-Visualisierung aus *Avengers: Age of Ultron*:
-Ein animierter Orb schwebt always-on-top auf dem Desktop, Klick öffnet das Chat-Panel im
-Film-HUD-Stil. Backend ist der eigene `jarvis_core` (Modell-Routing + Persona) direkt
-gegen ein lokales Ollama — keine Cloud (ADR 0002).
+A local desktop assistant for Windows. An animated orb floats on the desktop; clicking it opens a chat panel. Requests are routed to local language models through Ollama, so nothing leaves the machine. An optional voice daemon adds a wake word, speech-to-text and speech output.
 
-Design-Spec: [docs/superpowers/specs/2026-06-11-jarvis-desktop-gui-design.md](docs/superpowers/specs/2026-06-11-jarvis-desktop-gui-design.md)
+## Features
 
-## Voraussetzungen
+- Chat panel with model routing: a small model for quick answers and a larger one for heavy requests (see [ADR 0001](docs/adr/0001-local-model-strategy.md) and [ADR 0002](docs/adr/0002-heavy-lane-local-7b-no-cloud.md))
+- Voice interface: wake word (openWakeWord), German speech-to-text (faster-whisper), text-to-speech (edge-tts), barge-in and follow-up conversation
+- Browser control through the `chrome-devtools-mcp` server, using a separate Chrome profile
+- Daily briefing: open GitHub issues, unread Gmail (read-only), weather and system status
+- Orb rendered on canvas, with parameters configurable in `config.yaml`
 
-- Windows 10/11 mit **WebView2-Runtime** (auf Windows 11 vorinstalliert; sonst meldet
-  sich die App mit einer Installationsanleitung)
-- **Python 3.11** (nativ, kein Docker — ADR 0003)
-- **Ollama** unter `http://127.0.0.1:11434` mit den Modellen des Profils:
-  - Profil `home`: `ollama pull gemma3:4b` · `ollama pull qwen2.5:7b`
-  - Profil `dev`: `ollama pull qwen3.5:0.8b`
+## Requirements
 
-## Einrichtung
+- Windows 10 or 11 with the WebView2 runtime
+- Python 3.11
+- [Ollama](https://ollama.com) running on `127.0.0.1:11434`
+  - profile `home`: `gemma3:4b` and `qwen2.5:7b`
+  - profile `dev`: `qwen3.5:0.8b`
+- Node.js and Chrome for browser control (optional)
+
+## Setup
 
 ```bat
 py -3.11 -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-## Starten
+## Usage
 
 ```bat
-start_jarvis.bat                 :: nutzt das Profil aus config.yaml (home)
-start_jarvis.bat --profile dev   :: Arbeits-PC-Profil (kein 7B, kein nvidia-smi)
-start_jarvis.bat --debug         :: WebView-Devtools
+start_jarvis.bat                  :: profile from config.yaml
+start_jarvis.bat --profile dev    :: lightweight profile without the 7B model
+start_jarvis.bat --debug          :: open WebView devtools
 ```
 
-## Bedienung
+Controls: click the orb to toggle the chat panel, drag to move it, scroll over it to resize, right-click for the menu.
 
-| Aktion | Wirkung |
-|---|---|
-| **Klick** auf den Orb | Chat-Panel auf/zu (öffnet rechts, bei Platzmangel links) |
-| **Ziehen** des Orbs | Fenster frei positionieren (wird gespeichert) |
-| **Mausrad** über dem Orb | Orb stufenlos skalieren (wird gespeichert) |
-| **Rechtsklick** auf den Orb | Menü: Panel, Verlauf leeren, Beenden |
-| **7B-Knopf** | Schwerlast-Spur für die nächste Anfrage erzwingen |
-| Schlüsselwort „Schwerlast“ / „tiefe Recherche“ | ebenfalls Schwerlast-Spur |
-| **●-Knopf** (Mikrofon) | Push-to-talk — aktiv, sobald der Sprach-Daemon verbunden ist |
-
-Der Orb zeigt, was Jarvis tut: **Leerlauf** (gedimmt) · **Hört zu** (heller Kern,
-Halo-Puls) · **Denkt** (schneller, mehr Datenflüsse) · **Spricht** (Kern pulst im
-Sprechrhythmus; mit `amplitude` vom Sprach-Daemon zur echten Stimme).
-
-## Sprache („Hey Jarvis“)
+### Voice
 
 ```bat
-.venv\Scripts\python.exe -m pip install -r requirements-voice.txt   :: einmalig
-.venv\Scripts\python.exe -m voice_daemon.selfcheck                  :: Selbsttest
-start_daemon.bat                                                    :: Daemon starten
+.venv\Scripts\python.exe -m pip install -r requirements-voice.txt
+.venv\Scripts\python.exe -m voice_daemon.selfcheck
+start_daemon.bat
 ```
 
-Der Daemon läuft neben der App: **„Hey Jarvis“** sagen (openWakeWord, akzent-robust),
-kurzer Bestätigungston, auf Deutsch sprechen — faster-whisper (`language=de`, CPU)
-transkribiert, die Frage erscheint im Panel, die Antwort kommt als deutsche Stimme
-(`de-DE-ConradNeural`) und der Orb pulst zur echten Sprachausgabe. Der **●-Knopf**
-im Panel ist Push-to-talk, sobald der Daemon verbunden ist.
+Say "Hey Jarvis" to start. Microphone, model, voice, sensitivity and conversation window are set under `voice:` in `config.yaml`.
 
-**Gesprächsmodus:** Nach jeder Antwort hört Jarvis `follow_up_s` Sekunden weiter
-(Standard 6 s, Bestätigungston) — einfach weitersprechen, ohne neues „Hey Jarvis“.
-Wer schweigt, beendet das Gespräch.
+### Daily briefing
 
-**Unterbrechen:**
+Triggered by double clap, the voice command "Briefing", or the button in the panel. Optional setup for real data:
 
-| Situation | Sagen | Wirkung |
-|---|---|---|
-| Jarvis liest gerade vor | **„Hey Jarvis“** (reinrufen) | Ausgabe stoppt sofort, er hört zu |
-| Anfrage zurückziehen | „**Stop**“ · „vergiss es“ · „das war so nicht gemeint“ | Antwort wird verworfen, er hört direkt weiter |
-| Gespräch beenden | „**hör auf zuzuhören**“ · „das war alles“ · „schlaf weiter“ | „Sehr wohl, Sir.“ — zurück zum Wake Word |
+- GitHub: set a read-only token as `JARVIS_GITHUB_TOKEN` in `.env`
+- Gmail: place an OAuth client in `.secrets/credentials.json`, then run `python -m jarvis_core.briefing.gmail --login`
+- Weather: set the location under `briefing.weather` in `config.yaml`
 
-Einstellungen (Mikrofon, Modell, Stimme, Empfindlichkeit, Gesprächsfenster,
-Barge-in-Schwelle) in `config.yaml` unter `voice:`.
-
-**Geklonte Film-Stimme (`tts_engine: xtts`):** Aus einer lokalen Referenzaufnahme
-(`voice_daemon/assets/jarvis_reference.wav`, ~30 s saubere Sprache — bleibt aus
-Urheberrechtsgründen lokal und kommt nie ins Git) klont XTTS v2 die Stimme und
-spricht damit Deutsch. Läuft komplett lokal auf der CPU und ist deshalb **deutlich
-langsamer** (~4× Echtzeit: eine Zwei-Satz-Antwort braucht ~30 s Rechenzeit, das
-Modell lädt beim Daemon-Start ~30 s; vorgelesen werden max. 300 Zeichen, der Rest
-steht im Panel). Installation siehe `requirements-voice.txt` (coqui-tts +
-torch 2.8 CPU). Für schnelle Antworten zurück zu `tts_engine: edge`.
-
-## Browser-Steuerung
-
-Jarvis kann per Sprach- oder Textbefehl Chrome bedienen. Voraussetzung: **Node.js**
-(für `npx`) und **Chrome**. Beim ersten Browser-Befehl startet Jarvis den
-`chrome-devtools-mcp`-Server und öffnet ein **eigenes, dauerhaftes Jarvis-Profil**
-(`.chrome-jarvis`) — dein normaler, eingeloggter Chrome bleibt unangetastet. Du
-kannst dich im Jarvis-Chrome gezielt bei Diensten anmelden; das bleibt erhalten.
-
-Beispiele: „**Öffne YouTube**“ · „**such nach** Wetter in Hamburg“ · „**suche auf
-YouTube nach** Iron Man Trailer“ · „**geh zu** github.com“ · „**lies die Seite
-vor**“ · „**scroll runter**“ · „**geh zurück**“. Jarvis sagt jede Aktion an
-(„Ich öffne YouTube, Sir.“). Klare Befehle erkennt ein Schlüsselwort-Schnellpfad
-sofort; alles andere entscheidet das Modell per Tool-Calling (max. `max_steps`
-Schritte). Einstellungen in `config.yaml` unter `browser:` (`enabled`,
-`profile_dir`, `headless`, `max_steps`, `search_engine`). Installation des
-MCP-Clients: `mcp` aus `requirements-voice.txt`.
-
-## Tagesbriefing
-
-**Zweimal klatschen** (oder „Hey Jarvis, **Briefing**" sagen, oder den **▦-Knopf** im
-Panel) → Jarvis liest dir vor, was ansteht, und zeigt zugleich ein **Dashboard**:
-offene **GitHub-Issues** (`FabianLampe/jarvis-desktop`), neue **Gmails** (Anzahl, Absender,
-Betreff), **Wetter** heute, **Datum/Uhrzeit + Systemstatus**. V1 ist **rein lesend** —
-Mails beantworten/senden kommt später.
-
-Einmaliges Setup für echte Daten (ohne läuft alles, zeigt nur „nicht verfügbar"):
-- **GitHub:** read-only Token als `JARVIS_GITHUB_TOKEN` in `.env` (sonst nur öffentliche Issues).
-- **Gmail (nur lesen):** OAuth-Client (Google Cloud → Desktop-App) als
-  `.secrets/credentials.json` ablegen, dann `python -m jarvis_core.briefing.gmail --login`
-  (öffnet einmal den Browser, schreibt `.secrets/token.json`, Scope `gmail.readonly`).
-- **Wetter:** deinen Ort in `config.yaml` unter `briefing.weather` setzen.
-
-Klatsch-Empfindlichkeit in `config.yaml` unter `voice.clap_*` (oder `clap_enabled: false`).
-
-## Architektur
+## Project layout
 
 ```
-jarvis_app/    pywebview-Front: main.py (Fenster) · bridge.py (js_api) · ws_server.py (Daemon-Schnittstelle)
-  ui/          index.html · css/app.css · js/orb-engine.js · js/app.js · fonts/ (lokal gebündelt)
-jarvis_core/   UI-unabhängig: config · persona · router · ollama_client · chat · sysmon
-               + browser_intent · agent (Browser-Tool-Loop) · tools/ (browser MCP-Client, schemas)
-               + briefing/ (github · gmail · weather · aggregator — Tagesbriefing)
-voice_daemon/  ears (Wake Word + Aufnahme) · stt (Whisper de) · mouth (edge/xtts) · link (WS) · selfcheck
-config.yaml    Profile dev/home + Orb-Parameter (Seed 5) + voice- + browser-Sektion
-tests/         pytest: Router, Ollama-Client, ChatService, Bridge, WS, Browser-Intent/Schemas/Agent
+jarvis_app/     desktop front end (pywebview), JS bridge, WebSocket server for the daemon
+jarvis_core/    UI-independent core: config, persona, router, Ollama client, chat, system monitor,
+                browser agent and tools, briefing
+voice_daemon/   wake word, speech-to-text, speech output, WebSocket link
+config.yaml     profiles (dev, home), orb parameters, voice and browser settings
+docs/           architecture decisions (ADRs) and design specs
+tests/          pytest suite
 ```
 
-WS-Protokoll (`ws://127.0.0.1:8765`):
-Daemon → App `{"type":"state","value":"listening","amplitude":0.7}` ·
-`{"type":"utterance","text":"…"}` — App → Daemon `{"type":"push_to_talk"}` ·
-`{"type":"speak","text":"…"}`.
+The app and the voice daemon communicate over a local WebSocket (`ws://127.0.0.1:8765`).
 
-## Entwicklung
+## Development
 
 ```bat
-.venv\Scripts\python.exe -m pytest tests\ -q       :: Tests
+.venv\Scripts\python.exe -m pytest tests\ -q
 ```
 
-UI ohne App im Browser begutachten: `jarvis_app/ui/preview.html` öffnen
-(gemockte Bridge; Parameter `?open=1`, `?state=think`, `?zone=500`).
-Headless-Screenshot (Sichtprüfung wie im Brainstorming etabliert):
+The UI can be viewed without the app by opening `jarvis_app/ui/preview.html` in a browser (mocked bridge).
 
-```bat
-msedge --headless --screenshot=artifacts\ui.png --window-size=760,660 ^
-  --virtual-time-budget=5000 "file:///<pfad-zum-repo>/jarvis_app/ui/preview.html?open=1"
-```
+## Documentation
 
-## Hinweis
-
-Der Ordner `codex/` gehört nicht zur App (Altlast eines Werkzeug-Experiments) und wird
-von Code und Doku ignoriert.
+- [CONTEXT.md](CONTEXT.md): domain terms and project state
+- [docs/adr](docs/adr): architecture decision records
+- [docs/superpowers/specs](docs/superpowers/specs): design specs
