@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>J.A.R.V.I.S. — Orb v5 (einstellbar)</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Michroma&family=Rajdhani:wght@400;500;600&display=swap');
+* { box-sizing:border-box; margin:0; padding:0; }
+body { background:#060608; color:#e8c79a; font-family:'Rajdhani','Segoe UI',sans-serif; padding:30px 26px 60px; }
+.wrap { max-width:1100px; margin:0 auto; }
+h1 { font-family:'Michroma',Consolas,monospace; font-size:15px; letter-spacing:5px; color:#d99a4e; margin-bottom:8px; }
+.sub { font-size:15px; color:#9a8260; margin-bottom:22px; max-width:800px; line-height:1.5; }
+.compare { display:flex; gap:20px; align-items:flex-start; flex-wrap:wrap; }
+.box { background:#000; border:1px solid #2a2012; border-radius:8px; padding:13px; }
+.box .cap { font-family:'Michroma',Consolas,monospace; font-size:8px; letter-spacing:2.5px; color:#8a6a3c; margin-bottom:9px; }
+.box img { display:block; width:440px; height:auto; border-radius:3px; }
+canvas { display:block; border-radius:3px; }
+.panel { margin-top:20px; background:#0a0805; border:1px solid rgba(230,160,70,.3); padding:16px 18px; }
+.panel h2 { font-family:'Michroma',Consolas,monospace; font-size:9px; letter-spacing:3px; color:#d99a4e; margin-bottom:12px; }
+.grid { display:grid; grid-template-columns:repeat(3, 1fr); gap:14px 22px; }
+.ctl label { display:flex; justify-content:space-between; font-size:13px; color:#b59a72; margin-bottom:3px; }
+.ctl label b { color:#ffb45e; font-weight:500; }
+.ctl input[type=range] { width:100%; accent-color:#ffb45e; height:18px; }
+.seedrow { display:flex; gap:8px; align-items:center; margin-top:14px; }
+.seedrow .lbl { font-family:'Michroma',Consolas,monospace; font-size:8px; letter-spacing:2px; color:#8a6a3c; }
+.btn { font-family:'Michroma',Consolas,monospace; font-size:9px; letter-spacing:1.5px; color:#d99a4e; background:none; border:1px solid rgba(230,160,70,.5); padding:6px 11px; cursor:pointer; }
+.btn:hover { background:rgba(255,170,60,.1); color:#ffc94d; }
+#seedval { font-family:'Michroma',Consolas,monospace; font-size:11px; color:#ffc94d; min-width:46px; text-align:center; }
+.opts { display:flex; gap:16px; flex-wrap:wrap; margin-top:22px; }
+.opt { flex:1; min-width:300px; border:1px solid rgba(230,160,70,.35); background:#0a0805; padding:15px 17px; cursor:pointer; position:relative; transition:border-color .15s; }
+.opt:hover { border-color:rgba(255,200,100,.7); }
+.opt.selected { border-color:#ffc94d; background:#161005; box-shadow:0 0 18px rgba(255,180,60,.15); }
+.opt h3 { font-family:'Michroma',Consolas,monospace; font-size:10px; letter-spacing:2px; color:#ffb45e; margin-bottom:6px; }
+.opt p { font-size:14px; color:#a98c5e; line-height:1.45; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>FESTGEZURRT — DEIN J.A.R.V.I.S.</h1>
+  <p class="sub">Deine finalen Werte sind übernommen: Funken 250 · Adern 25 · Strahlen 4 · Ring-Helligkeit 0.5 · Glühen 0.9 · Tempo 0.7 · Seed 5. Genau so wird der Orb in der App geboren. <b style="color:#ffb45e">Weiter geht es im Terminal</b> — dort stelle ich dir jetzt die technische Architektur vor.</p>
+
+  <div class="compare">
+    <div class="box">
+      <div class="cap">ORIGINAL — FILMSTILL (WIKIPEDIA)</div>
+      <img src="https://upload.wikimedia.org/wikipedia/en/e/e0/J.A.R.V.I.S._%28MCU%29.png" alt="Original">
+      <div class="cap" style="margin:14px 0 9px">MEINE ANALYSE-MERKMALE</div>
+      <div style="font-size:13px;color:#9a8260;line-height:1.6">
+        ① helle Ring-Bänder, oben dominant<br>
+        ② Adern: dichte Zonen + Lücken, dick am Kern<br>
+        ③ dünne gerade Strahlen, teils überstehend<br>
+        ④ Goldstaub-Cluster + weiße Hot-Spots<br>
+        ⑤ Auge: Kern, heller Ring, Wirbelbögen<br>
+        ⑥ Daten fließen zwischen den Ringschichten
+      </div>
+    </div>
+    <div class="box" style="flex:1">
+      <div class="cap">LIVE — V5 ENGINE (EINSTELLBAR)</div>
+      <canvas id="orb" width="500" height="500" style="margin:0 auto"></canvas>
+    </div>
+  </div>
+
+  </div></div>
+
+<script>
+(function () {
+  var cv = document.getElementById('orb');
+  var ctx = cv.getContext('2d');
+  var DPR = window.devicePixelRatio || 1;
+  var S = 500;
+  cv.width = S * DPR; cv.height = S * DPR;
+  cv.style.width = S + 'px'; cv.style.height = S + 'px';
+  ctx.scale(DPR, DPR);
+  var C = S / 2, R = S * 0.355;
+
+  var P = { seed: 5, sparks: 250, veins: 25, rays: 4, ringb: 0.5, bloom: 0.9, speed: 0.7 };
+  window.setP = function (k, val) {
+    P[k] = val;
+    document.getElementById('v_' + k).textContent = (k === 'ringb' || k === 'bloom' || k === 'speed') ? val.toFixed(1) : val;
+    if (k === 'sparks' || k === 'veins' || k === 'rays') build();
+  };
+  window.seedStep = function (d) { P.seed = Math.max(1, P.seed + d); document.getElementById('seedval').textContent = P.seed; build(); };
+  window.seedRandom = function () { P.seed = 1 + Math.floor(Math.random() * 9999); document.getElementById('seedval').textContent = P.seed; build(); };
+
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = a + 0x6D2B79F5 | 0;
+      var t = Math.imul(a ^ a >>> 15, 1 | a);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+  var rnd;
+  function vlen(p) { return Math.sqrt(p.x * p.x + p.y * p.y + p.z * p.z); }
+  function norm(p) { var l = vlen(p) || 1; return { x: p.x / l, y: p.y / l, z: p.z / l }; }
+  function rv(a) { return { x: (rnd() * 2 - 1) * a, y: (rnd() * 2 - 1) * a, z: (rnd() * 2 - 1) * a }; }
+  function sphPt(r) { var a = rnd() * 6.283, c = rnd() * 2 - 1, s = Math.sqrt(1 - c * c); return { x: r * s * Math.cos(a), y: r * c, z: r * s * Math.sin(a) }; }
+
+  var rings = [
+    { y0: 0.50, tx: 0.10, tz: -0.06, drift: 0.10, bright: 1.3 },
+    { y0: 0.455, tx: 0.10, tz: -0.06, drift: 0.10, bright: 0.55 },
+    { y0: -0.08, tx: -0.14, tz: 0.10, drift: -0.06, bright: 0.8 },
+    { y0: -0.13, tx: -0.14, tz: 0.10, drift: -0.06, bright: 0.38 },
+    { y0: 0.16, tx: 0.05, tz: 0.16, drift: 0.04, bright: 0.3 }
+  ];
+
+  var veins, sparks, rays, flows;
+
+  function grow(start, dir, depth, steps, w0) {
+    var pts = [{ x: start.x, y: start.y, z: start.z }];
+    var p = { x: start.x, y: start.y, z: start.z }, d = norm(dir);
+    for (var s = 0; s < steps; s++) {
+      var rl = vlen(p) || 0.001;
+      var out = { x: p.x / rl, y: p.y / rl, z: p.z / rl };
+      var bias = rl < 0.85 ? 0.22 : 0.02;
+      var j = rv(0.62);
+      d = norm({ x: d.x * 0.72 + out.x * bias + j.x, y: d.y * 0.72 + out.y * bias + j.y, z: d.z * 0.72 + out.z * bias + j.z });
+      p = { x: p.x + d.x * 0.046, y: p.y + d.y * 0.046, z: p.z + d.z * 0.046 };
+      rl = vlen(p);
+      if (rl > 0.985) p = { x: p.x * 0.985 / rl, y: p.y * 0.985 / rl, z: p.z * 0.985 / rl };
+      pts.push({ x: p.x, y: p.y, z: p.z });
+      if (depth < 2 && s > 3 && rnd() < 0.20) {
+        grow(p, norm({ x: d.x + (rnd() * 2 - 1) * 1.2, y: d.y + (rnd() * 2 - 1) * 1.2, z: d.z + (rnd() * 2 - 1) * 1.2 }),
+             depth + 1, 8 + Math.floor(rnd() * 9), w0 * 0.55);
+      }
+    }
+    veins.push({ pts: pts, w0: w0, depth: depth });
+  }
+
+  function build() {
+    rnd = mulberry32(P.seed);
+    veins = []; sparks = []; rays = []; flows = [];
+
+    var sectors = [norm(rv(1)), norm(rv(1)), norm(rv(1))];
+    for (var v = 0; v < P.veins; v++) {
+      var sec = sectors[Math.floor(rnd() * sectors.length)];
+      var s0 = norm({ x: sec.x + (rnd() * 2 - 1) * 0.8, y: sec.y + (rnd() * 2 - 1) * 0.8, z: sec.z + (rnd() * 2 - 1) * 0.8 });
+      s0 = { x: s0.x * 0.12, y: s0.y * 0.12, z: s0.z * 0.12 };
+      grow(s0, norm(s0), 0, 26 + Math.floor(rnd() * 15), 1.7);
+    }
+    for (var v2 = 0; v2 < 7; v2++) {
+      var s1 = sphPt(0.09 + rnd() * 0.08);
+      grow(s1, norm(rv(1)), 2, 8 + Math.floor(rnd() * 7), 1.1);
+    }
+
+    for (var r1 = 0; r1 < P.rays; r1++) {
+      var dr = norm(rv(1));
+      rays.push({ a: { x: -dr.x * (0.7 + rnd() * 0.55), y: -dr.y * (0.7 + rnd() * 0.55), z: -dr.z * (0.7 + rnd() * 0.55) },
+                  b: { x: dr.x * (0.7 + rnd() * 0.6), y: dr.y * (0.7 + rnd() * 0.6), z: dr.z * (0.7 + rnd() * 0.6) },
+                  tw: rnd() * 6.283 });
+    }
+    var nch = Math.floor(P.rays * 0.66);
+    for (var c1 = 0; c1 < nch; c1++) {
+      var pa = sphPt(0.99), pb = sphPt(0.99), tries = 0;
+      while (vlen({ x: pa.x - pb.x, y: pa.y - pb.y, z: pa.z - pb.z }) < 1.1 && tries++ < 20) pb = sphPt(0.99);
+      rays.push({ a: pa, b: pb, tw: rnd() * 6.283, chord: true });
+    }
+
+    var clusters = [];
+    for (var cl = 0; cl < 4; cl++) clusters.push(sphPt(1));
+    for (var sp = 0; sp < P.sparks; sp++) {
+      var base;
+      if (rnd() < 0.72) {
+        var cc = clusters[Math.floor(rnd() * clusters.length)];
+        base = norm({ x: cc.x + (rnd() * 2 - 1) * 0.42, y: cc.y + (rnd() * 2 - 1) * 0.42, z: cc.z + (rnd() * 2 - 1) * 0.42 });
+      } else base = norm(rv(1));
+      var rr = 0.965 + rnd() * 0.035;
+      sparks.push({ x: base.x * rr, y: base.y * rr, z: base.z * rr,
+                    tw: rnd() * 6.283, sp: 0.6 + rnd() * 2.4,
+                    bokeh: rnd() < 0.13, sz: 0.5 + rnd() * 0.9, hot: rnd() < 0.09 });
+    }
+    var nvol = Math.floor(P.sparks * 0.37);
+    for (var sv = 0; sv < nvol; sv++) {
+      var pv = sphPt(Math.pow(rnd(), 0.7) * 0.88);
+      sparks.push({ x: pv.x, y: pv.y, z: pv.z, tw: rnd() * 6.283, sp: 0.8 + rnd() * 2.2,
+                    bokeh: rnd() < 0.10, sz: 0.4 + rnd() * 0.8, hot: false });
+    }
+
+    for (var fl = 0; fl < 10; fl++) flows.push({ phi: rnd() * 6.283, ph: rnd() * 6.283, sp: 0.35 + rnd() * 0.5 });
+  }
+  build();
+
+  function rot(p, yaw, pitch) {
+    var cy = Math.cos(yaw), sy = Math.sin(yaw);
+    var cx = Math.cos(pitch), sx = Math.sin(pitch);
+    var x1 = p.x * cy + p.z * sy;
+    var z1 = -p.x * sy + p.z * cy;
+    return { x: x1, y: p.y * cx - z1 * sx, z: p.y * sx + z1 * cx };
+  }
+  function proj(p) { var f = 3.4, s = f / (f - p.z); return { sx: C + p.x * R * s, sy: C + p.y * R * s, z: p.z }; }
+  function A(x) { return Math.min(1, x * P.bloom).toFixed(3); }
+
+  var t0 = performance.now(), tAcc = 2.0, lastNow = t0;
+  function frame(now) {
+    tAcc += (now - lastNow) / 1000 * P.speed; lastNow = now;
+    var t = tAcc;
+    ctx.clearRect(0, 0, S, S);
+
+    ctx.globalCompositeOperation = 'source-over';
+    var bg = ctx.createLinearGradient(0, 0, S, S);
+    bg.addColorStop(0, '#07080c'); bg.addColorStop(0.5, '#050507'); bg.addColorStop(1, '#06070a');
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, S, S);
+    ctx.fillStyle = 'rgba(70,110,150,0.05)';
+    ctx.beginPath(); ctx.arc(S * 0.13, S * 0.22, 34, 0, 6.283); ctx.fill();
+    ctx.beginPath(); ctx.arc(S * 0.88, S * 0.7, 44, 0, 6.283); ctx.fill();
+    ctx.beginPath(); ctx.arc(S * 0.8, S * 0.15, 24, 0, 6.283); ctx.fill();
+
+    var yaw = t * 0.10, pitch = 0.12 + Math.sin(t * 0.19) * 0.05;
+    ctx.globalCompositeOperation = 'lighter';
+    var i, j, d, p1, p2, tw;
+
+    for (i = 0; i < veins.length; i++) {
+      var vn = veins[i], pp = [];
+      for (j = 0; j < vn.pts.length; j++) pp.push(proj(rot(vn.pts[j], yaw, pitch)));
+      var CH = 4;
+      for (var c0 = 0; c0 < pp.length - 1; c0 += CH) {
+        var cEnd = Math.min(c0 + CH, pp.length - 1);
+        var zm = 0; for (j = c0; j <= cEnd; j++) zm += pp[j].z;
+        d = (zm / (cEnd - c0 + 1) + 1) / 2;
+        var prog = c0 / pp.length;
+        var w = vn.w0 * (1 - prog * 0.75);
+        ctx.beginPath(); ctx.moveTo(pp[c0].sx, pp[c0].sy);
+        for (j = c0 + 1; j <= cEnd; j++) ctx.lineTo(pp[j].sx, pp[j].sy);
+        ctx.strokeStyle = 'rgba(255,150,35,' + A((0.05 + d * 0.16) * (1 - prog * 0.4)) + ')';
+        ctx.lineWidth = w * 2.6; ctx.stroke();
+        var gcol = Math.floor(235 - prog * 50), bcol = Math.floor(185 - prog * 110);
+        ctx.beginPath(); ctx.moveTo(pp[c0].sx, pp[c0].sy);
+        for (j = c0 + 1; j <= cEnd; j++) ctx.lineTo(pp[j].sx, pp[j].sy);
+        ctx.strokeStyle = 'rgba(255,' + gcol + ',' + bcol + ',' + (0.10 + d * 0.42).toFixed(3) + ')';
+        ctx.lineWidth = Math.max(0.4, w * 0.85); ctx.stroke();
+      }
+    }
+
+    for (i = 0; i < rays.length; i++) {
+      var ry = rays[i];
+      p1 = proj(rot(ry.a, yaw, pitch)); p2 = proj(rot(ry.b, yaw, pitch));
+      d = ((p1.z + p2.z) / 2 + 1) / 2;
+      tw = 0.75 + 0.25 * Math.sin(ry.tw + t * 1.3);
+      ctx.strokeStyle = 'rgba(255,230,170,' + (((ry.chord ? 0.08 : 0.12) + d * (ry.chord ? 0.20 : 0.30)) * tw).toFixed(3) + ')';
+      ctx.lineWidth = 0.7;
+      ctx.beginPath(); ctx.moveTo(p1.sx, p1.sy); ctx.lineTo(p2.sx, p2.sy); ctx.stroke();
+    }
+
+    for (i = 0; i < rings.length; i++) {
+      var rg = rings[i];
+      var rr = Math.sqrt(Math.max(0, 1 - rg.y0 * rg.y0));
+      var segs = [];
+      for (var ang = 0; ang <= 6.30; ang += 0.045) {
+        var aa = ang + t * rg.drift;
+        var pr = { x: Math.cos(aa) * rr, y: rg.y0, z: Math.sin(aa) * rr };
+        var py = pr.y * Math.cos(rg.tx) - pr.z * Math.sin(rg.tx);
+        var pz = pr.y * Math.sin(rg.tx) + pr.z * Math.cos(rg.tx);
+        pr = { x: pr.x * Math.cos(rg.tz) - py * Math.sin(rg.tz), y: pr.x * Math.sin(rg.tz) + py * Math.cos(rg.tz), z: pz };
+        segs.push(proj(rot(pr, yaw, pitch)));
+      }
+      var CH2 = 9;
+      for (var q0 = 0; q0 < segs.length - 1; q0 += CH2) {
+        var q1 = Math.min(q0 + CH2, segs.length - 1);
+        var zm2 = 0; for (j = q0; j <= q1; j++) zm2 += segs[j].z;
+        d = (zm2 / (q1 - q0 + 1) + 1) / 2;
+        var AA = rg.bright * P.ringb * (0.10 + d * 0.55);
+        ctx.beginPath(); ctx.moveTo(segs[q0].sx, segs[q0].sy);
+        for (j = q0 + 1; j <= q1; j++) ctx.lineTo(segs[j].sx, segs[j].sy);
+        ctx.strokeStyle = 'rgba(255,150,35,' + A(AA * 0.22) + ')'; ctx.lineWidth = 6.5; ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(segs[q0].sx, segs[q0].sy);
+        for (j = q0 + 1; j <= q1; j++) ctx.lineTo(segs[j].sx, segs[j].sy);
+        ctx.strokeStyle = 'rgba(255,185,75,' + A(AA * 0.5) + ')'; ctx.lineWidth = 2.6; ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(segs[q0].sx, segs[q0].sy);
+        for (j = q0 + 1; j <= q1; j++) ctx.lineTo(segs[j].sx, segs[j].sy);
+        ctx.strokeStyle = 'rgba(255,235,185,' + A(AA * 0.85) + ')'; ctx.lineWidth = 1.0; ctx.stroke();
+      }
+    }
+
+    for (i = 0; i < flows.length; i++) {
+      var fwk = flows[i];
+      for (var trail = 0; trail < 4; trail++) {
+        var tt = t - trail * 0.06;
+        var mix = 0.5 + 0.5 * Math.sin(fwk.ph + tt * fwk.sp);
+        var yy = rings[0].y0 + (rings[2].y0 - rings[0].y0) * mix;
+        var rr2 = Math.sqrt(Math.max(0, 1 - yy * yy)) * 0.99;
+        var pf = { x: Math.cos(fwk.phi) * rr2, y: yy, z: Math.sin(fwk.phi) * rr2 };
+        p1 = proj(rot(pf, yaw, pitch));
+        d = (p1.z + 1) / 2;
+        ctx.fillStyle = 'rgba(255,240,200,' + ((0.4 + d * 0.5) * (1 - trail * 0.24)).toFixed(3) + ')';
+        ctx.beginPath(); ctx.arc(p1.sx, p1.sy, 1.3 - trail * 0.22 + d * 0.7, 0, 6.283); ctx.fill();
+      }
+    }
+
+    for (i = 0; i < sparks.length; i++) {
+      var n = sparks[i];
+      p1 = proj(rot(n, yaw, pitch));
+      d = (p1.z + 1) / 2;
+      if (n.bokeh) {
+        ctx.fillStyle = 'rgba(255,200,110,' + A(0.04 + d * 0.07) + ')';
+        ctx.beginPath(); ctx.arc(p1.sx, p1.sy, 2.6 + n.sz * 3.2, 0, 6.283); ctx.fill();
+      } else if (n.hot) {
+        tw = Math.max(0, Math.sin(n.tw + t * 2.6 * n.sp));
+        ctx.fillStyle = 'rgba(255,248,230,' + A((0.25 + d * 0.7) * tw) + ')';
+        ctx.beginPath(); ctx.arc(p1.sx, p1.sy, n.sz * (1.0 + d * 1.6) * (0.6 + tw * 0.4) + 0.3, 0, 6.283); ctx.fill();
+        ctx.fillStyle = 'rgba(255,190,90,' + A((0.10 + d * 0.18) * tw) + ')';
+        ctx.beginPath(); ctx.arc(p1.sx, p1.sy, n.sz * 3.2 * (0.6 + tw * 0.4), 0, 6.283); ctx.fill();
+      } else {
+        tw = Math.max(0, Math.sin(n.tw + t * 2.6 * n.sp));
+        ctx.fillStyle = 'rgba(255,' + (205 + Math.floor(d * 40)) + ',' + (115 + Math.floor(d * 75)) + ',' + ((0.16 + d * 0.68) * tw).toFixed(3) + ')';
+        ctx.beginPath(); ctx.arc(p1.sx, p1.sy, n.sz * (0.7 + d * 1.2) * (0.5 + tw * 0.5) + 0.25, 0, 6.283); ctx.fill();
+      }
+    }
+
+    var cg = ctx.createRadialGradient(C, C, 0, C, C, R * 0.26);
+    cg.addColorStop(0, 'rgba(255,250,238,0.9)');
+    cg.addColorStop(0.18, 'rgba(255,230,160,0.55)');
+    cg.addColorStop(0.5, 'rgba(255,170,60,0.18)');
+    cg.addColorStop(1, 'rgba(255,130,30,0)');
+    ctx.fillStyle = cg; ctx.beginPath(); ctx.arc(C, C, R * 0.26, 0, 6.283); ctx.fill();
+    var pul = 1 + 0.06 * Math.sin(t * 2.2);
+    ctx.strokeStyle = 'rgba(255,246,220,0.9)'; ctx.lineWidth = 2.0;
+    ctx.beginPath(); ctx.arc(C, C, R * 0.085 * pul, 0, 6.283); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,210,120,0.45)'; ctx.lineWidth = 1.1;
+    ctx.beginPath(); ctx.arc(C, C, R * 0.13, 0.6 + t * 0.9, 2.5 + t * 0.9); ctx.stroke();
+    ctx.beginPath(); ctx.arc(C, C, R * 0.175, 3.8 - t * 0.65, 5.2 - t * 0.65); ctx.stroke();
+
+    var og = ctx.createRadialGradient(C, C, R * 0.5, C, C, R * 1.45);
+    og.addColorStop(0, 'rgba(255,150,45,' + A(0.13) + ')');
+    og.addColorStop(1, 'rgba(255,120,20,0)');
+    ctx.fillStyle = og; ctx.fillRect(0, 0, S, S);
+    var ig = ctx.createRadialGradient(C, C, 0, C, C, R * 0.95);
+    ig.addColorStop(0, 'rgba(255,170,60,' + A(0.07) + ')');
+    ig.addColorStop(0.6, 'rgba(255,150,45,' + A(0.045) + ')');
+    ig.addColorStop(1, 'rgba(255,130,30,0)');
+    ctx.fillStyle = ig; ctx.beginPath(); ctx.arc(C, C, R * 0.95, 0, 6.283); ctx.fill();
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

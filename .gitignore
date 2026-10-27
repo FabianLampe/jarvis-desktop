@@ -1,0 +1,28 @@
+# Brainstorming-Sessions des Visual Companion
+.superpowers/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Lokales
+*.log
+.env
+
+# App-Zustand & Artefakte
+jarvis_app/layout.json
+artifacts/
+.models/
+
+# Stimm-Referenz (Filmmaterial — bleibt lokal, nie veröffentlichen)
+Jarvis voice.mp3
+voice_daemon/assets/jarvis_reference.wav
+
+# Browser-Steuerung: isoliertes Jarvis-Chrome-Profil (nie einchecken)
+.chrome-jarvis/
+.chrome-jarvis-test/
+
+# Tagesbriefing-Secrets (Gmail-OAuth-Client + Token) — nie einchecken
+.secrets/

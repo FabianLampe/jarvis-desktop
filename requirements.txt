@@ -1,0 +1,13 @@
+# J.A.R.V.I.S. Desktop-App — Laufzeit-Abhängigkeiten (Python 3.11, nativ, kein Docker)
+pywebview>=6.0
+psutil>=7.0
+PyYAML>=6.0
+websockets>=14.0
+requests>=2.32
+
+# Tagesbriefing — Gmail nur-lesen (GitHub/Wetter nutzen requests, schon vorhanden)
+google-api-python-client>=2.100
+google-auth-oauthlib>=1.2
+
+# Entwicklung/Tests
+pytest>=8.0

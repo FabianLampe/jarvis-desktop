@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>J.A.R.V.I.S.</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <div id="stage" class="side-right">
+    <div id="orbzone" class="pywebview-drag-region" title="Klick: Panel · Rad: Größe · Ziehen: verschieben">
+      <canvas id="orb"></canvas>
+    </div>
+
+    <div id="panel" class="hidden">
+      <span class="corner tl"></span><span class="corner tr"></span>
+      <span class="corner bl"></span><span class="corner br"></span>
+
+      <div id="panel-head">
+        <span id="panel-title">J.A.R.V.I.S.</span>
+        <span class="head-right">
+          <button id="btn-briefing" class="ctl-btn" title="Tagesbriefing">▦</button>
+          <span id="panel-online">ONLINE <span class="blink">▮</span></span>
+        </span>
+      </div>
+
+      <div id="statusbar">
+        <span>MODELL <b id="st-model">—</b></span>
+        <span>TEMPO <b id="st-tps">—</b> T/S</span>
+        <span>CPU <b id="st-cpu">—</b></span>
+        <span>RAM <b id="st-ram">—</b></span>
+        <span>VRAM <b id="st-vram">—</b></span>
+        <span id="st-heavy-wrap">SCHWERLAST: <b id="st-heavy">—</b></span>
+      </div>
+
+      <div id="log"></div>
+      <div id="dashboard" class="hidden"></div>
+
+      <div id="inputrow">
+        <input id="input" type="text" autocomplete="off" spellcheck="false"
+               placeholder="Befehl eingeben, Sir …">
+        <button id="btn-7b" class="ctl-btn" title="Schwerlast-Spur (7B) für die nächste Anfrage">7B</button>
+        <button id="btn-mic" class="ctl-btn" disabled
+                title="Push-to-talk — verfügbar, sobald der Sprach-Daemon verbunden ist">●</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="ctxmenu" class="hidden">
+    <button data-act="panel">PANEL AUF/ZU</button>
+    <button data-act="reset">VERLAUF LEEREN</button>
+    <button data-act="quit">J.A.R.V.I.S. BEENDEN</button>
+  </div>
+
+  <script src="js/orb-engine.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

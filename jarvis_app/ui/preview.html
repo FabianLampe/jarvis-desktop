@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>J.A.R.V.I.S. — Preview-Harness (gemockte Bridge)</title>
+<link rel="stylesheet" href="css/app.css">
+<style>
+  /* Nur Harness: dunkler „Desktop"-Hintergrund + zentrierte Bühne */
+  html, body {
+    background: radial-gradient(1200px 800px at 30% 20%, #10141f 0%, #07080d 55%, #04050a 100%);
+    height: 100%;
+  }
+  /* ?bright=1 — helles Wallpaper simulieren (Kontrast-Test für den Orb-Hof) */
+  body.bright, body.bright.bg-dark {
+    background: linear-gradient(135deg, #e8ecf2 0%, #cdd8e6 45%, #f4efe4 100%);
+    border: none; border-radius: 0;
+  }
+  /* Im bright-Modus zeigt #stage, wie das dunkle App-Fenster auf hellem
+     Wallpaper aussieht (in der App liegt der Stil auf body, hier auf der Bühne) */
+  body.bright.bg-dark #stage {
+    background: radial-gradient(120% 100% at 30% 20%, #0a0d14 0%, #060810 55%, #04050a 100%);
+    border: 1px solid rgba(230, 160, 70, .22);
+    border-radius: 12px;
+  }
+  body { display: flex; align-items: center; justify-content: center; }
+  #stage { height: 780px; }
+  #panel { width: 560px; }
+</style>
+<script>
+/* Gemockte pywebview-Bridge — MUSS vor app.js definiert sein.
+ * URL-Parameter: ?open=1 (Panel offen + Beispieldialog) · ?state=idle|listen|think|speak
+ *                ?zone=500 (Orb-Größe) · ?nochat=1 (kein Beispieldialog)
+ */
+(function () {
+  var Q = new URLSearchParams(location.search);
+  var zone = parseInt(Q.get('zone') || '360', 10);
+  var open = Q.get('open') === '1';
+  var P = function (v) { return Promise.resolve(v); };
+
+  var DEMO_ANSWER = 'Selbstverständlich, Sir. Die Diagnose läuft bereits — ' +
+    'alle Systeme arbeiten innerhalb der Parameter. Der Reaktor liefert stabile ' +
+    'Werte, und ich habe mir erlaubt, den Kaffee vorzuwärmen.';
+
+  window.pywebview = {
+    api: {
+      get_config: function () {
+        return P({
+          orb: { seed: 5, sparks: 250, veins: 25, rays: 4,
+                 ring_brightness: 0.5, bloom: 0.9, speed: 0.7 },
+          orb_px: Math.round(zone / 1.5), zone: zone,
+          profile: 'home',
+          models: { general: 'qwen2.5:3b', coder: 'qwen2.5-coder:3b', heavy: 'qwen2.5:7b' },
+          heavy_available: true,
+          window_bg: Q.get('winbg') || 'dark'
+        });
+      },
+      get_status: function () {
+        return P({ cpu: 17, ram: 46, vram: 63, model: 'qwen2.5:3b', tps: 87,
+                   heavy: 'BEREIT', heavy_available: true, online: true, daemon: false });
+      },
+      send_message: function (text, force) {
+        var sid = 's' + Date.now();
+        setTimeout(function () { window.jarvis.onMeta(sid, { type: 'route', lane: force ? 'heavy' : 'general', model: force ? 'qwen2.5:7b' : 'qwen2.5:3b' }); }, 30);
+        setTimeout(function () { window.jarvis.onState('think', null); }, 60);
+        var delay = 900;
+        DEMO_ANSWER.match(/.{1,7}/g).forEach(function (chunk, i, all) {
+          setTimeout(function () {
+            if (i === 0) window.jarvis.onState('speak', null);
+            window.jarvis.onToken(sid, chunk);
+            if (i === all.length - 1) {
+              window.jarvis.onMeta(sid, { type: 'done', tps: 87.3 });
+              window.jarvis.onState('idle', null);
+            }
+          }, delay + i * 36);
+        });
+        return P({ stream_id: sid });
+      },
+      toggle_panel: function () {
+        open = !open;
+        return P({ open: open, side: 'right' });
+      },
+      resize_orb: function (dir) {
+        zone = Math.max(165, Math.min(510, zone + (dir > 0 ? 18 : -18)));
+        return P({ orb_px: Math.round(zone / 1.5), zone: zone });
+      },
+      push_to_talk: function () { return P({ sent: false }); },
+      request_briefing: function () {
+        setTimeout(function () { window.jarvis.onBriefing({
+          datetime: 'Dienstag, 16. Juni, 22 Uhr 30',
+          weather: { temp_now: 14, temp_max: 18, temp_min: 9, text: 'bewölkt', ort: 'Hamburg' },
+          mails: [{ sender: 'Alice', subject: 'Rechnung Juni' }, { sender: 'Bob', subject: 'Meeting morgen' }],
+          issues: [{ number: 5, title: 'Orb flackert bei Last' }],
+          system: { cpu: 12, ram: 41, vram: 63 }, repo: 'FabianLampe/jarvis-desktop' }); }, 100);
+        return P({ ok: true });
+      },
+      reset_chat: function () { return P({ ok: true }); },
+      save_layout: function () { return P({ ok: true }); },
+      quit_app: function () { return P(null); }
+    }
+  };
+
+  window.addEventListener('DOMContentLoaded', function () {
+    if (Q.get('bright') === '1') document.body.classList.add('bright');
+    // Panel sofort (synchron) zeigen — Headless-Screenshots schießen direkt
+    // nach dem Load-Event, Timer-basiertes Öffnen käme zu spät
+    if (open) document.getElementById('panel').classList.remove('hidden');
+    setTimeout(function () {
+      if (open) {
+        if (Q.get('nochat') !== '1') {
+          window.jarvis.onStatus({ cpu: 17, ram: 46, vram: 63, model: 'qwen2.5:3b',
+                                   tps: 87, heavy: 'BEREIT', online: true });
+          var sid = 'demo1';
+          var addUser = function (t) {
+            var log = document.getElementById('log');
+            var el = document.createElement('div');
+            el.className = 'msg user';
+            el.innerHTML = '<div class="who">SIR</div>';
+            var tx = document.createElement('div');
+            tx.className = 'text'; tx.textContent = t;
+            el.appendChild(tx); log.appendChild(el);
+          };
+          window.jarvis.onMeta(sid, { type: 'route', lane: 'general', model: 'qwen2.5:3b' });
+          window.jarvis.onToken(sid, 'Online und bereit, Sir. Alle Systeme nominal.');
+          window.jarvis.onMeta(sid, { type: 'done', tps: 87.3 });
+          addUser('Jarvis, Statusbericht bitte.');
+          var sid2 = 'demo2';
+          window.jarvis.onMeta(sid2, { type: 'route', lane: 'general', model: 'qwen2.5:3b' });
+          window.jarvis.onToken(sid2, 'Sehr wohl, Sir. CPU bei 17 Prozent, der Reaktor — ' +
+            'Verzeihung, die GPU — bei 63 Prozent VRAM. Nichts, was uns Sorgen machen müsste.');
+          window.jarvis.onMeta(sid2, { type: 'done', tps: 86.1 });
+        }
+      }
+      var st = Q.get('state');
+      if (st) window.jarvis.onState(st, null);
+    }, 120);
+  });
+})();
+</script>
+</head>
+<body>
+  <!-- Markup-Kopie von index.html — bei Änderungen synchron halten -->
+  <div id="stage" class="side-right">
+    <div id="orbzone" class="pywebview-drag-region" title="Klick: Panel · Rad: Größe · Ziehen: verschieben">
+      <canvas id="orb"></canvas>
+    </div>
+
+    <div id="panel" class="hidden">
+      <span class="corner tl"></span><span class="corner tr"></span>
+      <span class="corner bl"></span><span class="corner br"></span>
+
+      <div id="panel-head">
+        <span id="panel-title">J.A.R.V.I.S.</span>
+        <span class="head-right">
+          <button id="btn-briefing" class="ctl-btn" title="Tagesbriefing">▦</button>
+          <span id="panel-online">ONLINE <span class="blink">▮</span></span>
+        </span>
+      </div>
+
+      <div id="statusbar">
+        <span>MODELL <b id="st-model">—</b></span>
+        <span>TEMPO <b id="st-tps">—</b> T/S</span>
+        <span>CPU <b id="st-cpu">—</b></span>
+        <span>RAM <b id="st-ram">—</b></span>
+        <span>VRAM <b id="st-vram">—</b></span>
+        <span id="st-heavy-wrap">SCHWERLAST: <b id="st-heavy">—</b></span>
+      </div>
+
+      <div id="log"></div>
+      <div id="dashboard" class="hidden"></div>
+
+      <div id="inputrow">
+        <input id="input" type="text" autocomplete="off" spellcheck="false"
+               placeholder="Befehl eingeben, Sir …">
+        <button id="btn-7b" class="ctl-btn" title="Schwerlast-Spur (7B) für die nächste Anfrage">7B</button>
+        <button id="btn-mic" class="ctl-btn" disabled
+                title="Push-to-talk — verfügbar, sobald der Sprach-Daemon verbunden ist">●</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="ctxmenu" class="hidden">
+    <button data-act="panel">PANEL AUF/ZU</button>
+    <button data-act="reset">VERLAUF LEEREN</button>
+    <button data-act="quit">J.A.R.V.I.S. BEENDEN</button>
+  </div>
+
+  <script src="js/orb-engine.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
