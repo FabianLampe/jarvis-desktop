@@ -226,27 +226,37 @@ class Daemon:
         das Mikrofon bleibt über die ganze Folge (z. B. Briefing-Zeilen) stummgeschaltet."""
         self._speak_q.put((text, follow_up))
 
+    STREAM_WAIT_S = 1.5      # so lange auf den nächsten Satz einer laufenden Antwort warten
+
     def _speaker_loop(self) -> None:
         while True:
             text, follow_up = self._speak_q.get()
             self.ears.suppress(True)                # das eigene Sprechen nicht wieder aufnehmen
-            want_follow_up = False
-            try:
+            state = {"follow_up": follow_up}
+
+            def texts(first=text):
+                """Erster Text, dann alles, was während des Sprechens nachkommt (Satz für Satz
+                gestreamte Antworten, Briefing-Zeilen) — ein durchgehender Fluss ohne Pausen."""
+                self._recent_spoken.append((time.monotonic(), first))
+                yield first
                 while True:
-                    self._recent_spoken.append((time.monotonic(), text))
-                    want_follow_up = follow_up
-                    self.link.send_state("thinking")
                     try:
-                        self.mouth.say(text,
-                                       on_amplitude=lambda a: self.link.send_state("speaking", a),
-                                       on_sentence=self.link.send_caption)
-                    except Exception:
-                        log.exception("Sprachausgabe fehlgeschlagen")
-                    self._recent_spoken.append((time.monotonic(), text))
-                    try:                           # folgt gleich noch eine Zeile? Mikrofon zu lassen
-                        text, follow_up = self._speak_q.get(timeout=0.6)
+                        nxt, fu = self._speak_q.get(timeout=self.STREAM_WAIT_S)
                     except queue.Empty:
-                        break
+                        return
+                    state["follow_up"] = fu
+                    self._recent_spoken.append((time.monotonic(), nxt))
+                    yield nxt
+            try:
+                self.link.send_state("thinking")
+                try:
+                    self.mouth.say_stream(texts(),
+                                          on_amplitude=lambda a: self.link.send_state("speaking", a),
+                                          on_sentence=self.link.send_caption)
+                except Exception:
+                    log.exception("Sprachausgabe fehlgeschlagen")
+                self._recent_spoken.append((time.monotonic(), text))
+                want_follow_up = state["follow_up"]
             finally:
                 self.ears.suppress(False)           # startet den Nachlauf (Echo-Ausklang)
                 self.link.send_state("idle")

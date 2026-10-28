@@ -30,3 +30,23 @@ def test_speakable_strips_code_blocks():
     out = speakable("Hier ist Code:\n```python\nprint(1)\n```\nFertig, Sir.", 1200)
     assert "```" not in out and "print" not in out
     assert "Panel" in out
+
+
+def test_long_first_sentence_is_split_not_truncated():
+    from voice_daemon.mouth import sentence_chunks
+    t = ("Es war einmal ein Leuchtturmwärter namens Elias, der auf einer kleinen Insel mitten im Meer lebte. "
+         "Er war glücklich.")
+    for fm, rm in ((80, 40), (120, 200), (30, 40)):
+        chunks = sentence_chunks(t, first_max=fm, rest_max=rm)
+        assert " ".join(chunks).split() == t.split(), (fm, chunks)     # kein Wort verloren
+        assert len(chunks[0]) <= fm
+
+
+def test_no_words_lost_for_any_text():
+    from voice_daemon.mouth import sentence_chunks
+    import random
+    rnd = random.Random(3)
+    words = "Sir Licht Meer Insel lebte Sturm, Boot. Hafen! Nacht? wach und hielt das".split()
+    for _ in range(200):
+        t = " ".join(rnd.choice(words) for _ in range(rnd.randint(1, 60)))
+        assert " ".join(sentence_chunks(t, first_max=rnd.randint(10, 120), rest_max=rnd.randint(10, 200))).split() == t.split()

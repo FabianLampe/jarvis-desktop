@@ -108,13 +108,18 @@ class OllamaClient:
 
     def chat_once(self, model: str, messages: list[dict], *,
                   tools: list[dict] | None = None, num_ctx: int = 2048,
-                  keep_alive: str | int = "30m") -> dict:
+                  keep_alive: str | int = "30m", num_predict: int | None = None,
+                  temperature: float | None = None) -> dict:
         """Einmalige (nicht-streamende) Chat-Antwort. Gibt die message zurück
         (enthält ggf. tool_calls). Für den Tool-Loop des Browser-Agenten."""
         payload: dict[str, Any] = {
             "model": model, "messages": messages, "stream": False,
             "options": {"num_ctx": num_ctx}, "keep_alive": keep_alive,
         }
+        if num_predict is not None:
+            payload["options"]["num_predict"] = num_predict
+        if temperature is not None:
+            payload["options"]["temperature"] = temperature
         if tools:
             payload["tools"] = tools
         r = self._post("/api/chat", payload, stream=False, model_for_404=model)

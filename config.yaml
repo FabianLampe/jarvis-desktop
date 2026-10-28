@@ -69,7 +69,8 @@ voice:                     # Sprach-Daemon (start_daemon.bat)
   tts_pitch: "-3Hz"        # einen Hauch tiefer
   robotic: 0.0             # 0–1: optionaler Roboter-Anstrich der Stimme; 0 = aus (klare Klonstimme)
   robotic_carrier_hz: 55   # Trägerfrequenz der Ringmodulation (tiefer = grollender, höher = blecherner)
-  tts_max_chars: 1200
+  tts_max_chars: 12000      # so viel wird vorgelesen (Geschichten zu Ende erzählen); Rest nur im Panel
+  filler_enabled: true      # lange Denkpausen (> 4 s Stille) mit geprüften Fun Facts bzw. echtem Wetter überbrücken
   input_device: null       # null = Standardmikrofon (sonst Index oder Name)
   output_device: null
   beep: true               # kurzer Ton, wenn Jarvis zuhört

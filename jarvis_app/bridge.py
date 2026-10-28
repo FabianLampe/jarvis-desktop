@@ -60,6 +60,44 @@ _AFFIRM = _re.compile(r"^(?:ja|jawohl|jep|okay|ok|gerne|gern|genau|los|bitte|na 
                       r"(?:\s*(?:bitte|mal|gerne|aus|ein|raus|durch))?)[\s,.!]*(?:bitte|gerne|mal)?[\s.!]*$", _re.I)
 
 
+class _SentenceSpeaker:
+    """Gibt eine gestreamte Antwort satzweise an die Sprachausgabe weiter, sobald ein Satz fertig ist —
+    statt erst nach der ganzen Antwort zu sprechen (lange Geschichten: keine Minute Stille)."""
+
+    _END = _re.compile(r"[.!?…](?=\s)|\n\n")   # Satzende erst mit folgendem Leerzeichen (z. B. „Dr.“ im Stream)
+
+    def __init__(self, say, on_first=None, min_chars: int = 15):
+        self.say, self.on_first, self.min_chars = say, on_first, min_chars
+        self.buf, self.spoken = "", False
+
+    def feed(self, token: str) -> None:
+        self.buf += token
+        if self.buf.count("```") % 2:                 # Codeblock offen: erst komplett abwarten
+            return
+        cut = -1
+        for m in self._END.finditer(self.buf):
+            # nur dort schneiden, wo kein Codeblock offen ist
+            if m.end() >= self.min_chars and self.buf[:m.end()].count("```") % 2 == 0:
+                cut = m.end()
+        if cut > 0:
+            self._emit(self.buf[:cut])
+            self.buf = self.buf[cut:]
+
+    def finish(self) -> None:
+        if self.buf.strip():
+            self._emit(self.buf)
+        self.buf = ""
+
+    def _emit(self, text: str) -> None:
+        text = text.strip()
+        if not text:
+            return
+        if not self.spoken and self.on_first:
+            self.on_first()
+        self.spoken = True
+        self.say(text)
+
+
 class Bridge:
     def __init__(self, cfg: AppConfig,
                  chat: ChatService | None = None,
@@ -93,6 +131,16 @@ class Bridge:
         self._telegram = None
         self._muted = False
         self._tasks: Optional[TaskManager] = None
+        from jarvis_core.fillers import FillerSource
+        self._fillers = FillerSource(weather=self._weather_for_filler)
+        self._last_said = 0.0
+        _say = self._hub.say
+
+        def say_and_note(text: str) -> bool:      # merkt sich, wann zuletzt gesprochen wurde (Stille messen)
+            import time as _t
+            self._last_said = _t.monotonic()
+            return _say(text)
+        self._hub.say = say_and_note
 
     # ------------------------------------------------ Werkzeug-Laufzeit
 
@@ -114,6 +162,37 @@ class Bridge:
         if q and self._tasks is not None and self._tasks.active():
             return q
         return None
+
+    FILLER_SILENCE_S = 4.0          # so lange Stille (seit dem letzten Gesprochenen), bevor ein Füllsatz kommt
+    FILLER_GAP_S = 12.0             # Mindestabstand zwischen zwei Füllsätzen
+    FILLER_MAX = 3
+
+    def _start_filler(self, request: str, answered: threading.Event) -> None:
+        if not (self._cfg.voice.get("filler_enabled", True) and self._hub.connected):
+            return
+        threading.Thread(target=self._filler_loop, args=(request, answered),
+                         name="jarvis-filler", daemon=True).start()
+
+    def _filler_loop(self, request: str, answered: threading.Event) -> None:
+        """Füllt echte Stille mit geprüften Inhalten (Fakten-Liste, echtes Wetter) — nie mit
+        Modell-Text, der Fakten erfinden oder die Antwort vorwegnehmen könnte."""
+        import time as _t
+        said, last_filler, started = 0, 0.0, _t.monotonic()
+        while said < self.FILLER_MAX and not answered.wait(0.25):
+            now = _t.monotonic()
+            quiet_since = max(self._last_said, started)        # Stille erst ab dieser Anfrage zählen
+            if now - quiet_since < self.FILLER_SILENCE_S or now - last_filler < self.FILLER_GAP_S:
+                continue
+            line = self._fillers.next(request)
+            if answered.is_set():
+                return
+            self._hub.say(line)
+            said, last_filler = said + 1, _t.monotonic()
+
+    def _weather_for_filler(self) -> Optional[str]:
+        from jarvis_core.tools.weather_tools import weather
+        rt = self._runtime()
+        return weather(rt.ctx, {"when": "heute"}).text
 
     def _push_tasks(self) -> None:
         if self._tasks is not None:
@@ -415,6 +494,10 @@ class Bridge:
         # Orb-Zustände selbst. Getippte Anfrage: Tokens live ins Panel wie bisher.
         buf: list[str] = []
         last_flush = 0.0
+        answered = threading.Event()                  # erste gesprochene Antwort ⇒ kein Füllsatz mehr
+        speaker = _SentenceSpeaker(self._hub.say, on_first=answered.set) if speak_back else None
+        if speak_back:
+            self._start_filler(text, answered)
 
         def flush(force: bool = False):
             nonlocal last_flush
@@ -428,6 +511,8 @@ class Bridge:
             for ev in self._chat.send(text, force_7b, model_override=self._quick_model()):
                 kind = ev.get("type")
                 if kind == "token":
+                    if speaker is not None:
+                        speaker.feed(ev["content"])
                     if not voice_origin:
                         buf.append(ev["content"])
                         flush()
@@ -447,10 +532,12 @@ class Bridge:
                     if kind == "done":
                         self._last_tps = ev.get("tps")
                         self._heavy_active = False
-                        if speak_back and ev.get("text"):
-                            self._hub.say(ev["text"])
+                        if speaker is not None:
+                            speaker.finish()              # Rest der Antwort (letzter Satz)
+                        answered.set()
                     elif kind == "error":
                         self._heavy_active = False
+                        answered.set()
                         if speak_back and ev.get("fatal"):
                             self._hub.say(ev.get("message", ""))
                     if not voice_origin:
@@ -458,6 +545,7 @@ class Bridge:
                     if kind in ("done", "error"):
                         self._push_status()
         except Exception:
+            answered.set()
             log.exception("Stream %s abgestürzt", sid)
             if voice_origin:
                 self._hub.say("Ein interner Fehler, Sir. Die Details stehen im Protokoll.")
@@ -548,6 +636,9 @@ class Bridge:
         task = tm.begin(text, voice=voice_origin)
         parallel = len(tm.active()) > 1
         final = ""
+        answered = threading.Event()
+        if voice_origin and speak_back:
+            self._start_filler(text, answered)
         self._js("jarvis.onState", "think", None)
         try:
             for ev in task.agent.run(text, history=list(self._chat.history[-6:])):
@@ -569,6 +660,7 @@ class Bridge:
                     if not voice_origin:
                         self._js("jarvis.onAction", sid, f"{ev['tool']}: {ev['text'][:160]}".replace("\n", " "), bool(ev["ok"]))
                 elif kind == "done":
+                    answered.set()
                     final = ev["text"]
                     tm.finish(task, bool(ev.get("ok")), final)
                     if voice_origin:
@@ -587,6 +679,7 @@ class Bridge:
                 self._js("jarvis.onToken", sid, final)
                 self._js("jarvis.onMeta", sid, {"type": "done", "tps": None})
         finally:
+            answered.set()
             if task.active:
                 tm.finish(task, False, final or "Beendet")
             self._chat.remember_exchange(text, final)

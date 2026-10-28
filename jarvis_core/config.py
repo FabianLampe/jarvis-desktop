@@ -48,7 +48,8 @@ DEFAULT_VOICE: dict[str, Any] = {
     "tts_pitch": "-3Hz",              # leicht abgesenkte Tonlage
     "robotic": 0.0,                   # 0–1: synthetischer Roboter-Anstrich der Stimme
     "robotic_carrier_hz": 55.0,       # Trägerfrequenz der Ringmodulation (tief = grollend)
-    "tts_max_chars": 1200,            # längere Antworten werden gekürzt vorgelesen
+    "tts_max_chars": 12000,
+    "filler_enabled": True,           # Denkpausen > 4 s mit geprüften Fakten/echtem Wetter füllen            # längere Antworten werden gekürzt vorgelesen
     "xtts_speaker_wav": "voice_daemon/assets/jarvis_reference.wav",
     "xtts_device": "auto",            # auto | cuda | cpu (cuda: ~10× schnellere Synthese)
     "input_device": None,             # None = Standardgerät (Index/Name möglich)

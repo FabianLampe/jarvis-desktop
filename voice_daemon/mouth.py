@@ -45,9 +45,16 @@ def sentence_chunks(text: str, first_max: int = 120, rest_max: int = 200) -> lis
     sentences = [s.strip() for s in _SENTENCE_END.split(text) if s.strip()]
     if not sentences:
         return []
-    chunks = [sentences[0][:first_max] if len(sentences[0]) > first_max else sentences[0]]
+    first, rest = sentences[0], sentences[1:]
+    if len(first) > first_max:
+        # langer erster Satz: an Komma (sonst Wortgrenze) TEILEN — nie abschneiden, kein Wort geht verloren
+        cut = first.rfind(", ", 0, first_max)
+        cut = cut + 1 if cut > 15 else first.rfind(" ", 0, first_max)
+        if cut > 0:
+            first, rest = first[:cut].strip(), [first[cut:].strip(), *rest]
+    chunks = [first]
     buf = ""
-    for s in sentences[1:]:
+    for s in rest:
         if buf and len(buf) + len(s) + 1 > rest_max:
             chunks.append(buf)
             buf = s
@@ -71,6 +78,72 @@ def speakable(text: str, max_chars: int) -> str:
         cut = cut[:cut.rfind(" ")] if " " in cut else cut
         text = cut + " … Den Rest zeige ich im Panel, Sir."
     return text
+
+
+def trim_tail(data: np.ndarray, sr: int, keep_s: float = 0.18, max_cut_s: float = 0.8) -> np.ndarray:
+    """Schneidet den leisen Ausklang nach dem letzten kräftigen Laut ab (Qwen/Voicebox hängen pro
+    Satz gern ein kurzes „hm“/Atmen an). Nie mehr als max_cut_s, damit echte leise Wörter bleiben."""
+    if data.size < sr * 0.4:
+        return data
+    hop = max(1, int(sr * 0.02))
+    env = np.sqrt(np.convolve(data.astype(np.float32) ** 2, np.ones(hop) / hop, mode="valid")[::hop])
+    if env.size == 0 or float(env.max()) <= 0:
+        return data
+    strong = np.nonzero(env > 0.05 * float(env.max()))[0]     # alles Hörbare bleiben lassen (auch „-er“)
+    if strong.size == 0:
+        return data
+    end = min(data.size, (int(strong[-1]) + 1) * hop + int(keep_s * sr))
+    if data.size - end > max_cut_s * sr:          # ungewöhnlich langer leiser Rest: lieber behalten
+        return data
+    return data[:end]
+
+
+def trim_lead(data: np.ndarray, sr: int, keep_s: float = 0.04) -> np.ndarray:
+    """Kürzt die Stille vor dem ersten Laut auf keep_s — Qwen beginnt jeden Teil mit bis zu 0,2 s Stille,
+    die sich an Nahtstellen zu hörbaren Pausen addiert."""
+    hop = max(1, int(sr * 0.01))
+    n = data.size // hop
+    if n < 5:
+        return data
+    env = np.sqrt((data[: n * hop].astype(np.float32) ** 2).reshape(n, hop).mean(axis=1))
+    on = np.nonzero(env > 0.04 * float(env.max() or 1.0))[0]
+    if on.size == 0:
+        return data
+    start = max(0, int(on[0]) * hop - int(keep_s * sr))
+    return data[start:]
+
+
+def strip_blips(data: np.ndarray, sr: int, max_blip_s: float = 0.16, min_gap_s: float = 0.15) -> np.ndarray:
+    """Entfernt isolierte Kurzlaute am Anfang/Ende eines Satzes: ein Fetzen ≤ max_blip_s, durch ≥ min_gap_s
+    Stille vom eigentlichen Satz getrennt (Qwen setzt so z. B. das Wortende der Referenz fort).
+    Echte kurze Wörter (≥ 0,16 s, z. B. „Sir“) bleiben stehen."""
+    hop = max(1, int(sr * 0.02))
+    n = data.size // hop
+    if n < 10:
+        return data
+    env = np.sqrt((data[: n * hop].astype(np.float32) ** 2).reshape(n, hop).mean(axis=1))
+    on = env > 0.06 * float(env.max() or 1.0)
+    segs, i = [], 0
+    while i < n:
+        if on[i]:
+            j = i
+            while j < n and on[j]:
+                j += 1
+            segs.append((i, j))
+            i = j
+        else:
+            i += 1
+    if len(segs) < 2:
+        return data
+    blip, gap = int(max_blip_s / 0.02), int(min_gap_s / 0.02)
+    start, end = 0, data.size
+    a0, b0 = segs[0]
+    if b0 - a0 <= blip and segs[1][0] - b0 >= gap:
+        start = max(0, segs[1][0] * hop - int(0.04 * sr))
+    a1, b1 = segs[-1]
+    if b1 - a1 <= blip and a1 - segs[-2][1] >= gap:
+        end = min(data.size, segs[-2][1] * hop + int(0.08 * sr))
+    return data[start:end] if end - start > sr * 0.2 else data
 
 
 def _emit_sentence(cb, text: str, seconds: float) -> None:
@@ -118,6 +191,64 @@ def apply_effects(data: np.ndarray, sr: int, chain: list[dict], board=None) -> n
     out = board(data.astype(np.float32).reshape(1, -1), sr, reset=False).reshape(-1)
     peak = float(np.abs(out).max())
     return (out * (0.99 / peak)).astype(np.float32) if peak > 0.99 else out.astype(np.float32)
+
+
+class _Player:
+    """Ausgabe über einen Rückruf-Stream: Daten aus einem Puffer, in Lücken (nächster Satz wird noch
+    berechnet) echte Stille. Ein leerlaufender Blocking-Stream erzeugt auf macOS kurze Störlaute."""
+
+    BLOCK = 1024                 # feste Blockgröße (~21 ms bei 48 kHz) statt winziger Häppchen
+
+    def __init__(self, sr: int, device=None):
+        import collections
+        self.sr = sr
+        self._buf: "collections.deque[np.ndarray]" = collections.deque()
+        self._lock = threading.Lock()
+        self.queued = 0                         # Samples im Puffer
+        self._stream = sd.OutputStream(samplerate=sr, channels=1, dtype="float32", device=device,
+                                       latency="high", blocksize=self.BLOCK, callback=self._cb)
+        self._stream.start()
+
+    def _cb(self, outdata, frames, t, status) -> None:
+        out = outdata[:, 0]
+        i = 0
+        with self._lock:
+            while i < frames and self._buf:
+                chunk = self._buf[0]
+                n = min(frames - i, chunk.size)
+                out[i:i + n] = chunk[:n]
+                i += n
+                if n == chunk.size:
+                    self._buf.popleft()
+                else:
+                    self._buf[0] = chunk[n:]
+            self.queued -= i
+        if i < frames:
+            out[i:] = 0.0                      # Lücke: Stille, kein Unterlauf
+
+    def write(self, data: np.ndarray) -> None:
+        with self._lock:
+            self._buf.append(np.ascontiguousarray(data, dtype=np.float32))
+            self.queued += data.size
+
+    def buffered_s(self) -> float:
+        return self.queued / self.sr
+
+    def clear(self) -> None:
+        with self._lock:
+            self._buf.clear()
+            self.queued = 0
+
+    def drain(self, abort, timeout: float = 120.0) -> None:
+        end = time.monotonic() + timeout
+        while self.queued > 0 and not abort() and time.monotonic() < end:
+            time.sleep(0.01)
+
+    def close(self) -> None:
+        try:
+            self._stream.stop()
+        finally:
+            self._stream.close()
 
 
 class QwenWorker:
@@ -202,7 +333,7 @@ class Mouth:
         self._robo_n = 0                 # fortlaufender Sample-Zähler (Phasenkontinuität)
         self._xtts = None
         self._abort = False
-        self._out = None                # durchgehender Ausgabestream der laufenden Äußerung
+        self._out: Optional[_Player] = None   # durchgehender Ausgabestream der laufenden Äußerung
         self._out_sr = 24000
         self._fx_board = None           # Effektzustand über Sätze hinweg
         self.voicebox_url = "http://127.0.0.1:17493"
@@ -289,7 +420,8 @@ class Mouth:
     def _synth_qwen(self, text: str):
         if self._qwen is None:
             self._qwen = QwenWorker(self.qwen_python, self.qwen_model)
-        return self._qwen.synth(text, self.qwen_ref_audio, self._qwen_reference_text(), self.qwen_language)
+        data, sr = self._qwen.synth(text, self.qwen_ref_audio, self._qwen_reference_text(), self.qwen_language)
+        return trim_lead(trim_tail(strip_blips(data, sr), sr), sr), sr
 
     def _say_qwen(self, text: str, on_amplitude, on_sentence) -> bool:
         clean = speakable(text, self.max_chars)
@@ -350,7 +482,7 @@ class Mouth:
         data, sr = sf.read(io.BytesIO(r.content), dtype="float32")
         if data.ndim > 1:
             data = data.mean(axis=1)
-        return data, sr
+        return trim_tail(data, sr), sr
 
     def _say_voicebox(self, text: str, on_amplitude, on_sentence) -> bool:
         """True, wenn Voicebox gesprochen hat. False ⇒ nicht erreichbar/Fehler, Aufrufer weicht aus."""
@@ -374,13 +506,13 @@ class Mouth:
     def _say_xtts_streamed(self, text: str,
                            on_amplitude: Optional[Callable[[float], None]],
                            on_sentence: Optional[Callable[[str], None]] = None,
-                           synth=None, chunks: Optional[list] = None,
+                           synth=None, chunks=None,          # Liste oder (blockierender) Iterator
                            first: Optional[tuple] = None) -> None:
         """Satz-Streaming: erster Satz spielt, während der Rest noch rechnet.
         on_sentence(text) feuert jeweils unmittelbar vor dem Abspielen — so
         erscheint der Text im Panel synchron zur gesprochenen Stimme."""
         chunks = chunks if chunks is not None else sentence_chunks(text)
-        if not chunks:
+        if isinstance(chunks, list) and not chunks:
             return
         if synth is None:
             self.load_xtts()
@@ -442,6 +574,56 @@ class Mouth:
         if peak > 0.99:
             out = out * (0.99 / peak)
         return out.astype(np.float32)
+
+    def say_stream(self, texts, on_amplitude: Optional[Callable[[float], None]] = None,
+                   on_sentence: Optional[Callable[[str], None]] = None) -> None:
+        """Spricht eine Folge von Texten, die erst nach und nach eintreffen (gestreamte Antwort), als
+        EINEN Fluss: Während Satz N läuft, wird Satz N+1 schon berechnet — keine Pause zwischen den
+        Sätzen. `texts` ist ein Iterator; er darf blockieren, bis der nächste Text da ist."""
+        self._fx_board = None
+        self._abort = False
+        self._robo_n = 0
+        try:
+            synth = {"qwen": self._synth_qwen, "voicebox": self._synth_voicebox}.get(self.engine)
+            if self.engine == "xtts":
+                self.load_xtts()
+                synth = self._synth_xtts
+            if synth is not None and self._engine_ok(synth):
+                def chunks():
+                    first = True
+                    for t in texts:
+                        clean = speakable(t, self.max_chars)
+                        # Nur der allererste Satz darf für einen schnellen Start am Komma geteilt werden;
+                        # danach bleiben Sätze ganz — sonst entsteht mitten im Satz eine Pause.
+                        yield from sentence_chunks(clean, first_max=80 if first else 100_000, rest_max=40)
+                        first = False
+                self._say_xtts_streamed("", on_amplitude, on_sentence, synth=synth, chunks=chunks())
+                return
+            for t in texts:                            # edge/system: nacheinander, aber ein Ausgabestream
+                if self._abort:
+                    break
+                self._say_inner(t, on_amplitude, on_sentence)
+        finally:
+            self._close_out()
+
+    def _engine_ok(self, synth) -> bool:
+        """Kurzer Verfügbarkeitstest (Qwen-Worker/Voicebox erreichbar), sonst Ausweichpfad."""
+        if self.engine == "qwen":
+            try:
+                if self._qwen is None or self._qwen._proc is None or self._qwen._proc.poll() is not None:
+                    self._synth_qwen("Ja.")           # startet/prüft den Worker
+                return True
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Qwen3-TTS nicht nutzbar (%s) — Ausweichpfad", exc)
+                return False
+        if self.engine == "voicebox":
+            try:
+                self.voicebox_profile_id()
+                return True
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Voicebox nicht nutzbar (%s) — Ausweichpfad", exc)
+                return False
+        return True
 
     def say(self, text: str,
             on_amplitude: Optional[Callable[[float], None]] = None,
@@ -545,14 +727,22 @@ class Mouth:
 
     FADE_S = 0.008            # weiche Kanten je Satz — verhindert Knacken an den Nahtstellen
 
-    def _open_out(self, sr: int):
-        """Ein durchgehender Ausgabestream je Äußerung (kein Öffnen/Schließen pro Satz = kein Plopp).
-        latency="high" gibt Reserve gegen Unterläufe, wenn andere Threads kurz rechnen."""
+    def _device_rate(self, fallback: int) -> int:
+        """Native Abtastrate des Ausgabegeräts (MacBook: 48 kHz). Mit 24 kHz zu öffnen zwingt macOS zu
+        ständiger Umrechnung in winzigen Blöcken — hörbar als Knacken."""
+        try:
+            info = sd.query_devices(self.device, kind="output")
+            rate = int(info["default_samplerate"])  # pyright: ignore[reportIndexIssue, reportCallIssue, reportArgumentType]
+            return rate if 8000 <= rate <= 192000 else fallback
+        except Exception:  # noqa: BLE001
+            return fallback
+
+    def _open_out(self, sr: int) -> _Player:
+        """Ein durchgehender Ausgabestream je Äußerung (kein Öffnen/Schließen pro Satz = kein Plopp),
+        immer mit der nativen Rate des Geräts."""
         if self._out is None:
-            self._out_sr = sr
-            self._out = sd.OutputStream(samplerate=sr, channels=1, dtype="float32",
-                                        device=self.device, latency="high")
-            self._out.start()
+            self._out_sr = self._device_rate(sr)
+            self._out = _Player(self._out_sr, self.device)
         return self._out
 
     def _close_out(self) -> None:
@@ -560,9 +750,11 @@ class Mouth:
         if out is None:
             return
         try:
-            if not self._abort:
-                out.write(np.zeros((int(self._out_sr * 0.12), 1), dtype="float32"))   # Ausklang ohne Abriss
-            out.stop()
+            if self._abort:
+                out.clear()
+            else:
+                out.drain(lambda: self._abort)        # zu Ende spielen lassen
+                time.sleep(0.12)                      # Ausklang ohne Abriss
         except Exception:  # noqa: BLE001
             log.debug("Ausgabestream schließen", exc_info=True)
         finally:
@@ -583,12 +775,13 @@ class Mouth:
                 data = apply_effects(data, sr, self.effects_chain, self._fx_board)
             except Exception:  # noqa: BLE001
                 log.exception("Effektkette fehlgeschlagen — spiele ohne Effekt")
-        if self._out is not None and sr != self._out_sr:           # alle Sätze auf eine Abtastrate bringen
+        out_sr = self._out_sr if self._out is not None else self._device_rate(sr)
+        if sr != out_sr:                                           # selbst hochwertig umrechnen (z. B. 24 → 48 kHz)
             from math import gcd
             from scipy.signal import resample_poly
-            g = gcd(self._out_sr, sr)
-            data = resample_poly(data, self._out_sr // g, sr // g).astype(np.float32)
-            sr = self._out_sr
+            g = gcd(out_sr, sr)
+            data = resample_poly(data, out_sr // g, sr // g).astype(np.float32)
+            sr = out_sr
         data = np.ascontiguousarray(data, dtype=np.float32).copy()
         fade = min(int(sr * self.FADE_S), data.size // 2)
         if fade > 1:
@@ -600,13 +793,17 @@ class Mouth:
         peak = float(np.percentile(np.abs(data), 99)) or 1.0
 
         out = self._open_out(sr)
+        lead = 0.25                                   # so weit darf der Puffer der Stimme vorauslaufen
         for i in range(0, data.size, block):
             if self._abort:
+                out.clear()
                 break
+            while out.buffered_s() > lead and not self._abort:
+                time.sleep(0.005)                     # Takt halten: Orb-Amplitude passt zur hörbaren Stimme
             chunk = data[i:i + block]
             if on_amplitude is not None:
                 rms = float(np.sqrt(np.mean(chunk ** 2)))
                 on_amplitude(min(1.0, rms / (peak * 0.7 + 1e-6)))
-            out.write(chunk.reshape(-1, 1))
+            out.write(chunk)
         if on_amplitude is not None:
             on_amplitude(0.0)

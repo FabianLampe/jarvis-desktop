@@ -159,7 +159,8 @@ def test_voice_utterance_shows_user_line_and_speaks_back(tmp_path):
     b = make_bridge(tmp_path)
     b._daemon_utterance("Wie ist der Status?")
     assert wait_for(lambda: b._hub.spoken)
-    assert b._hub.spoken == ["…"]  # done-Text aus FakeChat wird vorgelesen
+    # gestreamte Antwort wird (satzweise) vorgelesen — hier ein einziger Block ohne Satzende
+    assert wait_for(lambda: b._hub.spoken == ['Zeile mit "Anführungszeichen"\nund Umbruch'])
     joined = "\n".join(b._window.js_calls)
     assert 'jarvis.onUserMessage("Wie ist der Status?")' in joined
 

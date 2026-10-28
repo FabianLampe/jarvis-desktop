@@ -16,6 +16,7 @@ import soundfile as sf
 from jarvis_core import config as core_config
 
 TARGET_SR = 24000
+PAD_S = 0.6          # Stille vor und nach der Referenz
 
 
 def prepare(src: Path, dst: Path, seconds: float = 15.0) -> tuple[float, float]:
@@ -37,9 +38,17 @@ def prepare(src: Path, dst: Path, seconds: float = 15.0) -> tuple[float, float]:
     if peak < 1e-4:
         raise ValueError("Die Aufnahme ist praktisch stumm")
     data = data * (0.9 / peak)
+    # weich ein-/ausblenden und Stille anhängen: endet die Referenz mitten im Wort, setzt Qwen
+    # dieses Lautfragment (z. B. ein „n“) sonst am Anfang JEDES erzeugten Satzes fort
+    fade = int(TARGET_SR * 0.06)
+    ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+    data[:fade] *= ramp
+    data[-fade:] *= ramp[::-1]
+    pad = np.zeros(int(TARGET_SR * PAD_S), dtype=np.float32)
+    data = np.concatenate([pad, data, pad])
     dst.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(dst), data, TARGET_SR, subtype="PCM_16")
-    return total, data.size / TARGET_SR
+    return total, data.size / TARGET_SR - 2 * PAD_S
 
 
 def main() -> int:
