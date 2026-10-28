@@ -20,6 +20,8 @@ from websockets.asyncio.server import serve
 
 log = logging.getLogger("jarvis.ws")
 
+PORT_TRIES = 10     # Ausweichports ab voice_ws.port (siehe voice_daemon/link.py)
+
 _STATE_ALIASES = {
     "listening": "listen", "listen": "listen",
     "thinking": "think", "think": "think",
@@ -39,8 +41,10 @@ class VoiceHub:
         self._on_state: Callable[[str, Optional[float]], None] = lambda *_: None
         self._on_clients: Callable[[bool], None] = lambda *_: None
         self._on_utterance: Callable[[str], None] = lambda *_: None
-        self._on_caption: Callable[[str], None] = lambda *_: None
+        self._on_caption: Callable[..., None] = lambda *_: None
         self._on_briefing: Callable[[], None] = lambda: None
+        self._on_muted: Callable[[bool], None] = lambda _m: None
+        self._muted = False
 
     # ------------------------------------------------------------------ API
 
@@ -53,7 +57,8 @@ class VoiceHub:
               on_clients_changed: Callable[[bool], None],
               on_utterance: Callable[[str], None] | None = None,
               on_caption: Callable[[str], None] | None = None,
-              on_briefing: Callable[[], None] | None = None) -> None:
+              on_briefing: Callable[[], None] | None = None,
+              on_muted: Callable[[bool], None] | None = None) -> None:
         """Startet den Server in einem Daemon-Thread. Portkonflikt ⇒ nur Warnung."""
         self._on_state = on_state
         self._on_clients = on_clients_changed
@@ -63,6 +68,8 @@ class VoiceHub:
             self._on_caption = on_caption
         if on_briefing is not None:
             self._on_briefing = on_briefing
+        if on_muted is not None:
+            self._on_muted = on_muted
         threading.Thread(target=self._run, name="jarvis-ws", daemon=True).start()
 
     def push_to_talk(self) -> bool:
@@ -72,6 +79,19 @@ class VoiceHub:
     def say(self, text: str) -> bool:
         """Bittet den Daemon, eine Antwort vorzulesen."""
         return self._send({"type": "speak", "text": text})
+
+    @property
+    def muted(self) -> bool:
+        return self._muted
+
+    def set_muted(self, value: bool) -> bool:
+        """Mikrofon stumm/aktiv. Der Zustand wird gemerkt und bei neuer Daemon-Verbindung erneut gesendet."""
+        self._muted = bool(value)
+        return self._send({"type": "mute", "value": self._muted})
+
+    def stop_speaking(self) -> bool:
+        """Bricht laufende Sprachausgabe ab (Stopp-Knopf)."""
+        return self._send({"type": "stop"})
 
     def _send(self, payload: dict) -> bool:
         if not (self._loop and self._clients):
@@ -94,12 +114,26 @@ class VoiceHub:
             log.exception("WebSocket-Server abgestürzt")
 
     async def _serve(self) -> None:
-        async with serve(self._handler, self.host, self.port):
-            log.info("Sprach-Daemon-Schnittstelle bereit: ws://%s:%s", self.host, self.port)
-            await asyncio.Future()  # für immer
+        """Bindet den konfigurierten Port; ist er belegt, den nächsten freien (bis +9).
+        Der Daemon probiert dieselben Ports (voice_daemon/link.py)."""
+        base, last_exc = self.port, None
+        for port in range(base, base + PORT_TRIES):
+            try:
+                server = await serve(self._handler, self.host, port)
+            except OSError as exc:
+                last_exc = exc
+                log.warning("Port %s belegt (%s) — versuche %s", port, exc.strerror or exc, port + 1)
+                continue
+            self.port = port
+            log.info("Sprach-Daemon-Schnittstelle bereit: ws://%s:%s", self.host, port)
+            async with server:
+                await asyncio.Future()  # für immer
+        raise OSError(f"Kein freier Port in {base}–{base + PORT_TRIES - 1}: {last_exc}")
 
     async def _handler(self, ws) -> None:
         self._clients.add(ws)
+        if self._muted:                       # Stummschaltung überlebt Daemon-Neustarts
+            await ws.send(json.dumps({"type": "mute", "value": True}))
         self._on_clients(True)
         log.info("Sprach-Daemon verbunden (%s)", ws.remote_address)
         try:
@@ -122,9 +156,12 @@ class VoiceHub:
                 elif kind == "caption":
                     text = str(msg.get("text", "")).strip()
                     if text:
-                        self._on_caption(text)
+                        dur = msg.get("duration")
+                        self._on_caption(text, float(dur)) if dur is not None else self._on_caption(text)
                 elif kind == "briefing":
                     self._on_briefing()
+                elif kind == "muted":
+                    self._on_muted(bool(msg.get("value")))
         finally:
             self._clients.discard(ws)
             self._on_clients(self.connected)

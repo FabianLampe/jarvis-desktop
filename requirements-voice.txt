@@ -4,14 +4,17 @@ openwakeword>=0.6          # Wake Word "Hey Jarvis" (vortrainiert, akzent-robust
 onnxruntime>=1.17          # Inferenz für openwakeword
 sounddevice>=0.4.6         # Mikrofon/Lautsprecher (PortAudio gebündelt)
 soundfile>=0.12            # MP3/WAV-Decode (libsndfile gebündelt)
-edge-tts>=6.1              # deutsche TTS-Stimme (tts_engine: edge)
+edge-tts>=6.1              # deutsche TTS-Stimme (tts_engine: edge, braucht Internet)
 numpy>=1.24
 mcp>=1.20                  # MCP-Client für chrome-devtools-mcp (Browser-Steuerung; braucht Node/npx + Chrome)
+
+# Offline-Ausweichpfad für die Sprachausgabe (tts_engine: system):
+#   macOS nutzt den eingebauten `say`-Befehl — keine Installation nötig.
 
 # Stimm-Klon (tts_engine: xtts) — optional. Erst die Basis:
 #   pip install coqui-tts "transformers<5"
 # Dann PyTorch — GPU dringend empfohlen (xtts_device: cuda, RTF ~0,6 statt ~4 auf CPU):
-#   GPU (CUDA 12.x):  pip install torch==2.8.0+cu126 torchaudio==2.8.0+cu126 --index-url https://download.pytorch.org/whl/cu126
-#   nur CPU:          pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu
-# (torch < 2.9 bewusst: ab 2.9 verlangt torchaudio torchcodec + FFmpeg-DLLs auf Windows)
-# GPU-VRAM: XTTS ~2,9 GB teilt sich die 6 GB mit gemma3:4b — passt knapp (100% GPU).
+#   Windows GPU (CUDA 12.x):  pip install torch==2.8.0+cu126 torchaudio==2.8.0+cu126 --index-url https://download.pytorch.org/whl/cu126
+#   Windows nur CPU:          pip install torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+#   macOS (Apple Silicon):    ./start_jarvis_mac.sh --xtts   (torch==2.8.0; CPU gemessen RTF 0,6 — schneller als MPS)
+# (torch < 2.9 bewusst unter Windows: ab 2.9 verlangt torchaudio torchcodec + FFmpeg-DLLs)

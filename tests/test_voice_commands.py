@@ -46,3 +46,13 @@ def test_normal_utterances_pass_through():
 def test_wake_word_prefix_is_stripped():
     assert classify("Hey Jarvis: Stop") == "cancel"
     assert classify("Jarvis hör auf") == "sleep"
+
+
+def test_resolve_engine_never_leaves_jarvis_mute(tmp_path):
+    from voice_daemon.main import resolve_engine
+    ref = tmp_path / "ref.wav"
+    assert resolve_engine("xtts", str(ref)) == "edge"          # Referenz fehlt ⇒ Ausweichen
+    assert resolve_engine("auto", None) == "edge"
+    assert resolve_engine("voicebox", None) == "voicebox" and resolve_engine("system", None) == "system"
+    ref.write_bytes(b"x")
+    assert resolve_engine("xtts", str(ref)) in ("xtts", "edge")  # xtts nur mit installiertem Paket

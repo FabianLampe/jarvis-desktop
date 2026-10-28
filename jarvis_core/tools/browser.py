@@ -76,7 +76,9 @@ class BrowserController:
         self._session = await self._ctx_stack.enter_async_context(ClientSession(read, write))
         await self._session.initialize()
         resp = await self._session.list_tools()
-        self._tools = {t.name: getattr(t, "inputSchema", None) for t in resp.tools}
+        # mcp-SDK: inputSchema (1.x) bzw. input_schema (2.x)
+        self._tools = {t.name: (getattr(t, "inputSchema", None) or getattr(t, "input_schema", None))
+                       for t in resp.tools}
         log.info("chrome-devtools-mcp bereit (%d Werkzeuge, Profil %s)",
                  len(self._tools), self._profile)
         self._ready.set()
@@ -104,17 +106,32 @@ class BrowserController:
     def _call(self, tool: str, arguments: dict[str, Any]) -> str:
         if self._session is None or self._loop is None:
             raise BrowserError("Browser nicht gestartet")
+        if self._needs_page_id(tool) and "pageId" not in arguments:
+            pid = self._selected_page_id(self._raw_call("list_pages", {}))
+            if pid is None:
+                raise BrowserError("Kein offener Tab — zuerst eine Seite öffnen")
+            arguments = {"pageId": pid, **arguments}
+        return self._raw_call(tool, arguments)
+
+    def _needs_page_id(self, tool: str) -> bool:
+        """Neuere chrome-devtools-mcp-Versionen verlangen pageId in fast allen Werkzeugen."""
+        schema = self._tools.get(tool) or {}
+        return "pageId" in (schema.get("required") or [])
+
+    def _raw_call(self, tool: str, arguments: dict[str, Any]) -> str:
+        session, loop = self._session, self._loop
+        if session is None or loop is None:
+            raise BrowserError("Browser nicht gestartet")
+
         async def _run():
-            result = await self._session.call_tool(tool, arguments)
-            parts = []
-            for c in result.content:
-                if getattr(c, "type", None) == "text":
-                    parts.append(c.text)
+            result = await session.call_tool(tool, arguments)
+            parts = [str(getattr(c, "text", "")) for c in result.content if getattr(c, "type", None) == "text"]
             text = "\n".join(parts) if parts else "(kein Text)"
-            if getattr(result, "isError", False):
+            # mcp 1.x: isError · mcp 2.x: is_error
+            if getattr(result, "isError", False) or getattr(result, "is_error", False):
                 raise BrowserError(text)
             return text
-        fut = asyncio.run_coroutine_threadsafe(_run(), self._loop)
+        fut = asyncio.run_coroutine_threadsafe(_run(), loop)
         return fut.result(timeout=60)
 
     # ------------------------------------------------------------ hohe API

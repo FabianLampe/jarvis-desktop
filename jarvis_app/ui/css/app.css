@@ -280,3 +280,44 @@ body.bg-dark {
   cursor: pointer;
 }
 #ctxmenu button:hover { background: rgba(255, 170, 60, .12); color: var(--gold-bright); }
+
+/* ---- Werkzeug-Aktionen, Bestätigung, Stopp ---- */
+.msg .act { font-size: 14px; color: var(--text-dim); margin-bottom: 3px; letter-spacing: .3px; }
+.msg .act.good { color: #9bc27a; }
+.msg .act.bad { color: #e08948; }
+.confirm {
+  align-self: stretch; border: 1px solid var(--gold); background: rgba(40, 24, 6, .65);
+  padding: 12px 14px; margin: 4px 0;
+}
+.confirm-title { font-family: 'Michroma', Consolas, monospace; font-size: 11px; letter-spacing: 2px; color: var(--gold-bright); margin-bottom: 8px; }
+.confirm-body {
+  font-family: Consolas, Menlo, monospace; font-size: 14px; color: var(--gold);
+  white-space: pre-wrap; word-break: break-all; margin-bottom: 10px; max-height: 140px; overflow: auto;
+}
+.confirm-row { display: flex; gap: 10px; }
+.confirm.approved { border-color: #9bc27a; }
+.confirm.declined { border-color: var(--bronze-dim); opacity: .7; }
+.ctl-btn.stop { color: #e08948; border-color: rgba(224, 137, 72, .6); }
+.hidden { display: none !important; }
+
+/* ---- Mute, Neuer Chat, Kontextanzeige ---- */
+#btn-mute.muted { color: #e08948; border-color: #e08948; background: rgba(224,137,72,.15); }
+#btn-mute.muted::after { content: ' AUS'; }
+#btn-newchat { padding: 6px 10px; }
+#ctxbar { height: 4px; background: rgba(230,160,70,.15); margin: 0 0 6px 0; }
+#ctxfill { height: 100%; width: 0%; background: var(--bronze); transition: width .4s, background .4s; }
+#ctxfill.warn { background: var(--gold-bright); }
+#ctxfill.full { background: #e05a3a; }
+#st-ctx-wrap.warn b { color: var(--gold-bright); }
+#st-ctx-wrap.full b { color: #e05a3a; }
+.ctx-note { color: #e08948; font-size: 14px; margin: 4px 0; }
+
+/* ---- Parallele Aufgaben ---- */
+#tasks { border: 1px solid rgba(230,160,70,.3); background: rgba(20,14,6,.5); margin: 0 0 8px 0; padding: 6px 10px; }
+#tasks .trow { display: flex; align-items: center; gap: 8px; font-size: 15px; color: var(--text-dim); padding: 2px 0; }
+#tasks .trow b { color: var(--gold); font-weight: 500; }
+#tasks .trow .tcur { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#tasks .trow.confirm .tcur { color: var(--gold-bright); }
+#tasks .trow .tx { background: none; border: 1px solid rgba(224,137,72,.5); color: #e08948; cursor: pointer; font-size: 12px; padding: 0 6px; }
+#tasks .trow .pulse { width: 6px; height: 6px; background: var(--gold); border-radius: 50%; animation: tp 1s infinite; }
+@keyframes tp { 50% { opacity: .25; } }

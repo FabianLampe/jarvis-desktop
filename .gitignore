@@ -26,3 +26,12 @@ voice_daemon/assets/jarvis_reference.wav
 
 # Tagesbriefing-Secrets (Gmail-OAuth-Client + Token) — nie einchecken
 .secrets/
+
+# Qwen3-TTS-Umgebung
+.venv-qwen/
+
+# Stimmreferenz samt Transkript (persönlich) — nie einchecken
+voice_daemon/assets/
+
+# Werkzeug-Caches
+.pytest_cache/

@@ -13,7 +13,7 @@ class FakeChat:
     def __init__(self):
         self.history = []
 
-    def send(self, text, force_7b=False):
+    def send(self, text, force_7b=False, model_override=None):
         yield {"type": "route", "lane": "general", "model": "g3", "reason": "Test",
                "heavy_requested": False, "heavy_unavailable": False}
         yield {"type": "state", "value": "think"}
@@ -24,6 +24,12 @@ class FakeChat:
 
     def reset(self):
         self.history.clear()
+
+    def remember_exchange(self, user, assistant):
+        self.history.extend([{"role": "user", "content": user}, {"role": "assistant", "content": assistant}])
+
+    def context_info(self):
+        return {"used": 0, "total": 8192, "pct": 0, "messages": len(self.history), "source": "geschätzt", "model": "g3"}
 
 
 class FakeWindow:
@@ -47,6 +53,9 @@ class FakeHub:
         return True
 
     def push_to_talk(self):
+        return False
+
+    def stop_speaking(self):
         return False
 
 

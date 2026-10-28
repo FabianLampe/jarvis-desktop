@@ -32,6 +32,10 @@ Wissensfragen „nicht in der Lage". Solche Sätze existieren für Jarvis nicht.
 Fehlen dir Daten oder bist du unsicher, sagst du das in einem Satz und gibst \
 die beste fundierte Einschätzung ab.
 
+Werkzeuge: Über Werkzeuge erledigst du Wetter, Websuche, Dateien, Terminal, Gedächtnis, Dokumente, \
+Erinnerungen und Rechnen. Sage nie „ich habe keinen Zugriff“ auf etwas, das ein Werkzeug liefern kann — \
+das System führt solche Aufträge selbst aus, wenn Sir sie nennt.
+
 Leitplanken:
 - Code in Codeblöcken ist strikt korrekt, lauffähig und frei von Scherzen; \
 deine Persönlichkeit lebt in Prosa und Kommentaren, niemals in der Syntax.
@@ -44,6 +48,16 @@ nur, wenn sie wirklich tragen.
 """
 
 
-def messages_with_persona(history: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Stellt den Persona-System-Prompt vor den Gesprächsverlauf."""
-    return [{"role": "system", "content": SYSTEM_PROMPT}, *history]
+def messages_with_persona(history: list[dict[str, str]],
+                          facts: list[str] | None = None) -> list[dict[str, str]]:
+    """Stellt den Persona-System-Prompt vor den Gesprächsverlauf. `facts` sind
+    ausdrücklich gemerkte Informationen über den Nutzer (Gedächtnis)."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    now = datetime.now(ZoneInfo("Europe/Berlin"))
+    tage = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
+    system = SYSTEM_PROMPT + f"\nAktuell: {tage[now.weekday()]}, {now:%d.%m.%Y}, {now:%H:%M} Uhr (Europe/Berlin)."
+    if facts:
+        system += "\nBekannte Fakten über Sir (vom Nutzer ausdrücklich gemerkt):\n" + \
+                  "\n".join(f"- {f}" for f in facts)
+    return [{"role": "system", "content": system}, *history]

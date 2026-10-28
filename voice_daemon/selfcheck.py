@@ -45,8 +45,8 @@ def tts_to_f32(text: str, voice: str) -> tuple[np.ndarray, int]:
     async def synth() -> bytes:
         buf = bytearray()
         async for chunk in edge_tts.Communicate(text, voice).stream():
-            if chunk["type"] == "audio":
-                buf.extend(chunk["data"])
+            if chunk.get("type") == "audio":
+                buf.extend(chunk.get("data") or b"")
         return bytes(buf)
 
     mp3 = asyncio.run(synth())
@@ -109,7 +109,8 @@ def main() -> int:
         pcm = (resample_to_16k(wake, wsr) * 32767).astype(np.int16)
         best = 0.0
         for i in range(0, pcm.size - 1280, 1280):
-            best = max(best, float(model.predict(pcm[i:i + 1280])[key]))
+            scores = model.predict(pcm[i:i + 1280])
+            best = max(best, float(scores[key]))  # pyright: ignore[reportArgumentType, reportCallIssue, reportIndexIssue]
         verdict = "BESTANDEN" if best >= v["wake_threshold"] else \
             f"niedrig (TTS-Stimme; mit echter Stimme meist deutlich höher)"
         print(f"[4] Wake Word „{key}“: bester Score {best:.2f} "

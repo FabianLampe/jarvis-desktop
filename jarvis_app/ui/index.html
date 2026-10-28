@@ -18,6 +18,8 @@
       <div id="panel-head">
         <span id="panel-title">J.A.R.V.I.S.</span>
         <span class="head-right">
+          <button id="btn-newchat" class="ctl-btn" title="Neuen Chat starten (leert Verlauf und Kontext)">NEU</button>
+          <button id="btn-mute" class="ctl-btn" title="Mikrofon stumm schalten — Jarvis hört dann nicht mehr zu">MIC</button>
           <button id="btn-briefing" class="ctl-btn" title="Tagesbriefing">▦</button>
           <span id="panel-online">ONLINE <span class="blink">▮</span></span>
         </span>
@@ -29,15 +31,19 @@
         <span>CPU <b id="st-cpu">—</b></span>
         <span>RAM <b id="st-ram">—</b></span>
         <span>VRAM <b id="st-vram">—</b></span>
+        <span id="st-ctx-wrap">KONTEXT <b id="st-ctx">—</b></span>
         <span id="st-heavy-wrap">SCHWERLAST: <b id="st-heavy">—</b></span>
       </div>
 
+      <div id="ctxbar" title="Kontextfenster des Modells"><div id="ctxfill"></div></div>
+      <div id="tasks" class="hidden"></div>
       <div id="log"></div>
       <div id="dashboard" class="hidden"></div>
 
       <div id="inputrow">
         <input id="input" type="text" autocomplete="off" spellcheck="false"
                placeholder="Befehl eingeben, Sir …">
+        <button id="btn-stop" class="ctl-btn stop hidden" title="Laufende Aktion abbrechen">■</button>
         <button id="btn-7b" class="ctl-btn" title="Schwerlast-Spur (7B) für die nächste Anfrage">7B</button>
         <button id="btn-mic" class="ctl-btn" disabled
                 title="Push-to-talk — verfügbar, sobald der Sprach-Daemon verbunden ist">●</button>

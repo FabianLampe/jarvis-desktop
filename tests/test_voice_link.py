@@ -38,17 +38,17 @@ def hub_events():
         on_utterance=lambda t: events.append(("utterance", t)),
     )
     # Auf den Server warten
-    ws = None
     end = time.monotonic() + 5
-    while time.monotonic() < end:
+    while True:                                  # nur auf den Server warten …
         try:
-            ws = connect(f"ws://127.0.0.1:{port}", open_timeout=1)
+            socket.create_connection(("127.0.0.1", port), timeout=1).close()
             break
         except OSError:
+            if time.monotonic() > end:
+                raise AssertionError("WS-Server nicht erreichbar")
             time.sleep(0.1)
-    assert ws is not None, "WS-Server nicht erreichbar"
-    yield hub, ws, events
-    ws.close()
+    with connect(f"ws://127.0.0.1:{port}", open_timeout=2) as ws:   # … dann sauber als Kontextmanager
+        yield hub, ws, events
 
 
 def test_daemon_to_app_state_and_utterance(hub_events):
@@ -83,3 +83,25 @@ def test_disconnect_clears_connected(hub_events):
     ws.close()
     assert wait_for(lambda: not hub.connected)
     assert ("clients", False) in events
+
+
+def test_port_fallback_when_default_taken():
+    """Belegter Standardport (fremder Dienst) ⇒ Hub weicht aus, Daemon-Link findet ihn."""
+    import asyncio, socket, threading, time
+    from jarvis_app.ws_server import VoiceHub
+    from voice_daemon.link import Link, _candidate_urls
+    blocker = socket.socket(); blocker.bind(("127.0.0.1", 0)); blocker.listen()
+    port = blocker.getsockname()[1]
+    hub = VoiceHub("127.0.0.1", port)
+    got = []
+    hub.start(on_state=lambda *a: None, on_clients_changed=lambda c: None, on_utterance=got.append)
+    time.sleep(0.8)
+    assert hub.port == port + 1
+    assert _candidate_urls(f"ws://127.0.0.1:{port}", 3)[1].endswith(str(port + 1))
+    link = Link(f"ws://127.0.0.1:{port}")
+    threading.Thread(target=lambda: asyncio.run(link.run()), daemon=True).start()
+    for _ in range(60):
+        if hub.connected: break
+        time.sleep(0.1)
+    assert hub.connected
+    blocker.close()

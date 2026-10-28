@@ -25,7 +25,7 @@ FRAME = 1280        # 80 ms — openWakeWord-Schrittweite
 
 def ensure_wake_model(name: str):
     """Lädt das openWakeWord-Modell (einmaliger Download der Basismodelle)."""
-    import openwakeword
+    import openwakeword.utils
     from openwakeword.model import Model
 
     try:
@@ -34,6 +34,11 @@ def ensure_wake_model(name: str):
         log.info("Lade openWakeWord-Modelle herunter (einmalig) …")
         openwakeword.utils.download_models()
         return Model(wakeword_models=[name], inference_framework="onnx")
+
+
+def _score(model, frame, key: str) -> float:
+    """openWakeWord liefert {Modellname: Score}; die Stubs kennen nur eine Union."""
+    return float(model.predict(frame)[key])  # pyright: ignore[reportCallIssue, reportArgumentType, reportIndexIssue]
 
 
 class Ears:
@@ -61,6 +66,9 @@ class Ears:
         self._model = None
         self._model_key: Optional[str] = None
         self._next_lead_in = 5.0               # Wartezeit auf Sprachbeginn (s)
+        self._muted = threading.Event()        # an: Mikrofon geschlossen, Jarvis hört nichts
+        self._quiet_until = 0.0                # Nachlauf nach der Ausgabe: Raumhall/Echo ignorieren
+        self._echo_tail_s = float(voice_cfg.get("echo_tail_s", 0.8))
         self._clap = None
         if voice_cfg.get("clap_enabled", True):
             from .clap import ClapDetector
@@ -94,6 +102,13 @@ class Ears:
         if on:
             self._suppress.set()
         else:
+            # Nachlauf: Lautsprecher-Ausklang und Raumhall nicht als Eingabe werten
+            self._quiet_until = time.monotonic() + self._echo_tail_s
+            self._drain()
+            if self._model is not None:
+                self._model.reset()
+            if self._clap is not None:
+                self._clap.reset()
             self._suppress.clear()
 
     def stop(self) -> None:
@@ -109,23 +124,53 @@ class Ears:
         except queue.Full:
             pass  # lieber Frames verlieren als blockieren
 
+    def set_muted(self, on: bool) -> None:
+        """Stumm: der Mikrofonstream wird geschlossen (macOS-Aufnahmeanzeige erlischt)."""
+        if on:
+            self._muted.set()
+            self._listen_now.clear()
+        else:
+            self._muted.clear()
+        self._drain()
+        log.info("Mikrofon %s", "STUMM — Jarvis hört nicht zu" if on else "aktiv")
+
+    @property
+    def muted(self) -> bool:
+        return self._muted.is_set()
+
     def _loop(self) -> None:
+        while not self._stop.is_set():
+            if self._muted.is_set():
+                self._stop.wait(0.2)
+                continue
+            try:
+                self._run_stream()
+            except Exception:
+                log.exception("Mikrofonstream fehlgeschlagen — neuer Versuch in 2 s")
+                self._stop.wait(2.0)
+
+    def _run_stream(self) -> None:
         device = self.cfg.get("input_device")
         threshold = float(self.cfg["wake_threshold"])
         # Beim Vorlesen ist der Störabstand schlechter (Lautsprecher-Übersprechen)
         # — Barge-in darf deshalb etwas empfindlicher sein.
         interrupt_threshold = float(self.cfg.get("interrupt_threshold", 0.5))
         cooldown_until = 0.0
+        model, key = self._model, self._model_key
+        assert model is not None and key is not None, "start() lädt das Wake-Word-Modell"
 
         with sd.InputStream(samplerate=SR, channels=1, dtype="int16",
                             blocksize=FRAME, device=device,
                             callback=self._audio_cb):
             log.info("Mikrofon offen — sage „Hey Jarvis“ …")
-            while not self._stop.is_set():
+            while not self._stop.is_set() and not self._muted.is_set():
                 try:
                     frame = self._q.get(timeout=0.5)
                 except queue.Empty:
                     continue
+
+                if time.monotonic() < self._quiet_until:
+                    continue                      # Nachlauf nach der Ausgabe: nichts auswerten
 
                 # Doppelklatsch (nicht während Jarvis spricht) → Tagesbriefing
                 if self._clap is not None and not self._suppress.is_set():
@@ -138,10 +183,10 @@ class Ears:
                     # Jarvis spricht: weiter auf „Hey Jarvis“ lauschen,
                     # damit Sir ihn unterbrechen kann.
                     self._listen_now.clear()
-                    score = float(self._model.predict(frame)[self._model_key])
+                    score = _score(model, frame, key)
                     if score >= interrupt_threshold and time.monotonic() >= cooldown_until:
                         log.info("Barge-in erkannt (Score %.2f) — Ausgabe stoppt", score)
-                        self._model.reset()
+                        model.reset()
                         cooldown_until = time.monotonic() + 1.5
                         self.on_interrupt()
                     continue
@@ -150,15 +195,15 @@ class Ears:
                     self._listen_now.clear()
                     self._record(self._next_lead_in)
                     self._next_lead_in = 5.0
-                    self._model.reset()  # alte Scores verwerfen
+                    model.reset()  # alte Scores verwerfen
                     cooldown_until = time.monotonic() + 1.0
                     continue
 
-                score = float(self._model.predict(frame)[self._model_key])
+                score = _score(model, frame, key)
                 if score >= threshold and time.monotonic() >= cooldown_until:
                     log.info("Wake Word erkannt (Score %.2f)", score)
                     self._record(5.0)
-                    self._model.reset()
+                    model.reset()
                     cooldown_until = time.monotonic() + 1.0
 
     def _record(self, lead_in_s: float) -> None:
@@ -166,6 +211,7 @@ class Ears:
         self.on_listen_start()
         if self.cfg.get("beep", True):
             self._beep()
+            time.sleep(0.35)          # Beep (0,09 s) samt Ausklang abwarten, sonst zählt er als „Sprache“
         self._drain()
 
         max_frames = int(float(self.cfg["max_utterance_s"]) * SR / FRAME)
@@ -177,8 +223,12 @@ class Ears:
         peak = 0.0
         speech_seen = False
         quiet_run = 0
+        loud_run = 0              # laute Frames in Folge — ein Klick/Beep-Rest ist keine Sprache
 
         for i in range(max_frames):
+            if self._muted.is_set():
+                self.on_audio(np.zeros(0, dtype=np.float32), False)   # Zustand zurück auf „idle“
+                return
             try:
                 frame = self._q.get(timeout=1.0)
             except queue.Empty:
@@ -192,10 +242,14 @@ class Ears:
             if not speech_seen:
                 noise = 0.95 * noise + 0.05 * rms
                 if rms > max(120.0, noise * 3.0):
-                    speech_seen = True
-                    quiet_run = 0
+                    loud_run += 1
+                    if loud_run >= 3:     # ≥ 240 ms durchgehend laut
+                        speech_seen = True
+                        quiet_run = 0
                 elif i > lead_in_frames:
                     break  # niemand spricht
+                else:
+                    loud_run = 0
             else:
                 if rms < max(90.0, noise * 2.2):
                     quiet_run += 1
@@ -206,8 +260,8 @@ class Ears:
 
         audio = (np.concatenate(chunks).astype(np.float32) / 32768.0
                  if chunks else np.zeros(0, dtype=np.float32))
-        log.debug("Aufnahme: %.1f s, Spitzen-RMS %.0f, Sprache=%s",
-                  audio.size / SR, peak, speech_seen)
+        log.info("Aufnahme: %.1f s, Spitzen-RMS %.0f, Sprache erkannt=%s",
+                 audio.size / SR, peak, speech_seen)
         self.on_audio(audio, speech_seen)
 
     def _drain(self) -> None:

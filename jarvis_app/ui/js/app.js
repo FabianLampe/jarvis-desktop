@@ -17,6 +17,9 @@
 
   var $ = function (id) { return document.getElementById(id); };
   var orbzone, log, input;
+  var muted = false;
+  var daemonUp = false;
+  var ctxWarned = false;
   var captionMsg = null; // laufende Jarvis-Nachricht aus Sprach-Captions
 
   // ------------------------------------------------------ Chat-Verlauf
@@ -66,6 +69,56 @@
     return c;
   }
 
+  // ---- Schreibmaschine: Text erscheint Zeichen für Zeichen, als würde er gerade getippt ----
+  // typer = {el, q, cps, mark, timer, last, onIdle}. Mit Dauer (Sprache): endet pünktlich zum Satzende.
+  // Ohne Dauer (getippte Antwort): ~70 Zeichen/s, bei Rückstand schneller, damit nichts hinterherhinkt.
+  function makeTyper(el, cursor) {
+    return { el: el, cursor: cursor || null, q: '', cps: 70, acc: 0, last: 0, timer: null, onIdle: null };
+  }
+
+  function typerPush(t, text, seconds) {
+    if (!text) return;
+    t.q += text;
+    if (seconds && seconds > 0.2) {
+      // gesprochen: Satz soll kurz vor Ende der Stimme fertig getippt sein (Rückstand mitgerechnet)
+      t.cps = Math.max(18, t.q.length / (seconds * 0.9));
+      t.fixed = true;
+    } else {
+      t.fixed = false;
+    }
+    if (!t.timer) {
+      t.last = performance.now();
+      t.timer = setInterval(function () { typerTick(t); }, 16);
+    }
+  }
+
+  function typerTick(t) {
+    var now = performance.now();
+    var dt = (now - t.last) / 1000;
+    t.last = now;
+    var cps = t.cps;
+    if (!t.fixed) cps = Math.max(70, t.q.length * 2.2);          // Aufholen bei Rückstand
+    t.acc += cps * dt;
+    var n = Math.floor(t.acc);
+    if (n > 0) {
+      t.acc -= n;
+      var chunk = t.q.slice(0, n);
+      t.q = t.q.slice(n);
+      t.el.appendChild(document.createTextNode(chunk));
+      scrollLog();
+    }
+    if (!t.q.length) {
+      clearInterval(t.timer);
+      t.timer = null;
+      if (t.onIdle) t.onIdle();
+    }
+  }
+
+  function typerFlush(t) {
+    if (t.q.length) { t.el.appendChild(document.createTextNode(t.q)); t.q = ''; }
+    if (t.timer) { clearInterval(t.timer); t.timer = null; }
+  }
+
   function startStream(sid) {
     var m = addMsg('J.A.R.V.I.S.', 'jarvis');
     var t = document.createElement('span');
@@ -74,14 +127,22 @@
     cur.className = 'cursor';
     m.text.appendChild(t);
     m.text.appendChild(cur);
-    streams[sid] = { el: m.el, textSpan: t, cursor: cur, gotToken: false };
+    streams[sid] = { el: m.el, textSpan: t, cursor: cur, gotToken: false, done: false };
+    streams[sid].typer = makeTyper(t, cur);
     return streams[sid];
   }
 
   function finishStream(sid) {
     var s = streams[sid];
-    if (s && s.cursor && s.cursor.parentNode) s.cursor.parentNode.removeChild(s.cursor);
-    setBusy(false);
+    function finalize() {
+      if (s && s.cursor && s.cursor.parentNode) s.cursor.parentNode.removeChild(s.cursor);
+      setBusy(false);
+    }
+    if (s && s.typer && s.typer.q.length) {      // erst fertig tippen, dann Cursor weg und Eingabe frei
+      s.typer.onIdle = finalize;
+    } else {
+      finalize();
+    }
   }
 
   function addSystemLine(text) {
@@ -93,7 +154,109 @@
     busy = b;
     input.disabled = b;
     $('btn-7b').disabled = b;
+    $('btn-stop').classList.toggle('hidden', !b);
     if (!b) input.focus();
+  }
+
+  // Aktionszeile eines Werkzeugs („▸ Ich lege den Ordner an“) bzw. Ergebnis (✓/✗)
+  function addActionLine(sid, text, cls) {
+    var s = streams[sid] || startStream(sid);
+    var line = document.createElement('div');
+    line.className = 'act ' + (cls || '');
+    line.textContent = text;
+    s.el.insertBefore(line, s.el.querySelector('.text'));
+    scrollLog();
+  }
+
+  // Bestätigungskarte: zeigt die konkrete Aktion; die Zustimmung gilt genau dieser id
+  function addConfirm(ev) {
+    var c = document.createElement('div');
+    c.className = 'confirm';
+    var h = document.createElement('div');
+    h.className = 'confirm-title';
+    h.textContent = 'BESTÄTIGUNG ERFORDERLICH';
+    var body = document.createElement('pre');
+    body.className = 'confirm-body';
+    body.textContent = ev.summary;
+    var row = document.createElement('div');
+    row.className = 'confirm-row';
+    var yes = document.createElement('button');
+    yes.className = 'ctl-btn'; yes.textContent = 'AUSFÜHREN';
+    var no = document.createElement('button');
+    no.className = 'ctl-btn'; no.textContent = 'ABLEHNEN';
+    function decide(ok) {
+      yes.disabled = no.disabled = true;
+      c.classList.add(ok ? 'approved' : 'declined');
+      h.textContent = ok ? 'BESTÄTIGT' : 'ABGELEHNT';
+      if (api) api.confirm_action(ev.id, ok);
+    }
+    yes.addEventListener('click', function () { decide(true); });
+    no.addEventListener('click', function () { decide(false); });
+    row.appendChild(yes); row.appendChild(no);
+    c.appendChild(h); c.appendChild(body); c.appendChild(row);
+    log.appendChild(c);
+    scrollLog();
+  }
+
+  function fmtTok(n) { return n >= 1000 ? (n / 1000).toFixed(1).replace('.0', '') + 'k' : String(n); }
+
+  // Kontextfenster: belegte Tokens / Größe, Balken wird gelb ab 70 %, rot ab 90 %
+  function showContext(c) {
+    var pct = c.pct || 0;
+    $('st-ctx').textContent = fmtTok(c.used) + '/' + fmtTok(c.total) + ' · ' + pct + '%';
+    $('st-ctx-wrap').title = c.messages + ' Nachrichten im Verlauf · ' + c.source + ' · ' + (c.model || '');
+    $('ctxfill').style.width = Math.min(100, pct) + '%';
+    var cls = pct >= 90 ? 'full' : pct >= 70 ? 'warn' : '';
+    $('ctxfill').className = cls;
+    $('st-ctx-wrap').className = cls;
+    if (pct >= 85 && !ctxWarned) {
+      ctxWarned = true;
+      var n = document.createElement('div');
+      n.className = 'ctx-note';
+      n.textContent = 'Das Kontextfenster ist fast voll, Sir — für bessere Antworten einen neuen Chat starten (NEU).';
+      log.appendChild(n); scrollLog();
+    }
+    if (pct < 50) ctxWarned = false;
+  }
+
+  function setMuteUi(m) {
+    muted = m;
+    $('btn-mute').classList.toggle('muted', m);
+    $('btn-mute').title = m ? 'Mikrofon ist AUS — Klick schaltet Jarvis wieder zum Zuhören' :
+                              'Mikrofon stumm schalten — Jarvis hört dann nicht mehr zu';
+    $('btn-mic').disabled = m || !daemonUp;
+    if (m && engine) engine.setState('idle');
+  }
+
+  // Laufende (parallele) Aufgaben: was macht Jarvis gerade — jede einzeln abbrechbar
+  function showTasks(list) {
+    var box = $('tasks');
+    box.innerHTML = '';
+    (list || []).forEach(function (t) {
+      var row = document.createElement('div');
+      row.className = 'trow' + (t.status === 'confirm' ? ' confirm' : '');
+      var dot = document.createElement('span'); dot.className = 'pulse';
+      var id = document.createElement('b'); id.textContent = '#' + t.id;
+      var txt = document.createElement('span'); txt.className = 'tcur';
+      txt.textContent = t.text + ' — ' + t.current + ' (' + t.seconds + ' s)';
+      var x = document.createElement('button'); x.className = 'tx'; x.textContent = '✕';
+      x.title = 'Diese Aufgabe abbrechen';
+      x.addEventListener('click', function () { if (api) api.cancel_task(t.id); });
+      row.appendChild(dot); row.appendChild(id); row.appendChild(txt); row.appendChild(x);
+      box.appendChild(row);
+    });
+    box.classList.toggle('hidden', !(list && list.length));
+  }
+
+  function clearChat() {
+    log.innerHTML = '';
+    $('dashboard').classList.add('hidden');
+    $('log').classList.remove('hidden');
+    Object.keys(streams).forEach(function (k) { if (streams[k].typer) typerFlush(streams[k].typer); });
+    if (captionMsg && captionMsg.typer) typerFlush(captionMsg.typer);
+    streams = {}; captionMsg = null; ctxWarned = false;
+    setBusy(false);
+    addSystemLine('Neuer Chat, Sir. Der Verlauf ist leer.');
   }
 
   // ----------------------------------------------------- Bridge → UI
@@ -102,8 +265,7 @@
     onToken: function (sid, chunk) {
       var s = streams[sid] || startStream(sid);
       s.gotToken = true;
-      s.textSpan.textContent += chunk;
-      scrollLog();
+      typerPush(s.typer, chunk, null);
     },
     onState: function (state, amplitude) {
       if (engine) engine.setState(state, amplitude);
@@ -117,6 +279,9 @@
       $('st-heavy').textContent = st.heavy || '—';
       $('st-heavy-wrap').className = st.heavy === 'AKTIV' ? 'heavy-active' : '';
 
+      if (st.context) showContext(st.context);
+      if (st.tasks) showTasks(st.tasks);
+      if (st.muted !== undefined && st.muted !== muted) setMuteUi(!!st.muted);
       if (st.online === false && lastOnline !== false) {
         $('panel-online').innerHTML = 'OFFLINE <span class="blink">▮</span>';
         $('panel-online').classList.add('offline');
@@ -157,19 +322,40 @@
           break;
       }
     },
+    onAction: function (sid, text, ok) {
+      addActionLine(sid, (ok === false ? '✗ ' : ok === true ? '✓ ' : '▸ ') + text,
+                    ok === false ? 'bad' : ok === true ? 'good' : '');
+    },
+    onConfirm: function (ev) { addConfirm(ev); },
+    onNotice: function (text) { addSystemLine(text); },
+    onNewChat: function () { clearChat(); },
+    onTasks: function (list) { showTasks(list); },
     onDaemon: function (connected) {
-      $('btn-mic').disabled = !connected;
+      daemonUp = !!connected;
+      $('btn-mic').disabled = !daemonUp || muted;
     },
     onUserMessage: function (text) {
       addUserMsg(text);
       captionMsg = null; // neue Sprachfrage → nächste Caption beginnt frische Antwort
     },
-    onCaption: function (text) {
-      // Sprach-Antwort: jede Sentence erscheint genau dann, wenn Jarvis sie spricht
-      if (!captionMsg) captionMsg = addMsg('J.A.R.V.I.S.', 'jarvis');
-      captionMsg.text.textContent +=
-        (captionMsg.text.textContent ? ' ' : '') + text;
-      scrollLog();
+    onCaption: function (text, seconds) {
+      // Sprach-Antwort: jede Sentence wird genau dann getippt, wenn Jarvis sie spricht
+      if (!captionMsg) {
+        captionMsg = addMsg('J.A.R.V.I.S.', 'jarvis');
+        var t = document.createElement('span'); t.className = 't';
+        var cur = document.createElement('span'); cur.className = 'cursor';
+        captionMsg.text.appendChild(t); captionMsg.text.appendChild(cur);
+        captionMsg.typer = makeTyper(t, cur);
+        captionMsg.typer.onIdle = function () {              // Cursor nach kurzer Ruhe ausblenden
+          clearTimeout(captionMsg && captionMsg.hide);
+          var m = captionMsg;
+          if (m) m.hide = setTimeout(function () { if (m.typer && !m.typer.q.length && cur.parentNode) cur.parentNode.removeChild(cur); }, 1800);
+        };
+      }
+      var sep = captionMsg.typer.el.textContent.length || captionMsg.typer.q.length ? ' ' : '';
+      if (captionMsg.hide) clearTimeout(captionMsg.hide);
+      if (!captionMsg.text.contains(captionMsg.typer.cursor)) captionMsg.text.appendChild(captionMsg.typer.cursor);
+      typerPush(captionMsg.typer, sep + text, seconds);
     },
     onBriefing: function (data) {
       var d = $('dashboard');
@@ -272,10 +458,7 @@
       $('ctxmenu').classList.add('hidden');
       if (act === 'panel') togglePanel();
       if (act === 'reset' && api) {
-        api.reset_chat().then(function () {
-          log.innerHTML = '';
-          addSystemLine('Verlauf gelöscht, Sir. Ein frisches Blatt.');
-        });
+        api.new_chat().then(function (r) { clearChat(); if (r && r.context) showContext(r.context); });
       }
       if (act === 'quit' && api) api.quit_app();
     });
@@ -322,6 +505,18 @@
       if (e.key === 'Escape') togglePanel();
     });
     $('btn-7b').addEventListener('click', function () { setForce7b(!force7b); });
+    $('btn-newchat').addEventListener('click', function () {
+      if (!api) return;
+      api.new_chat().then(function (r) { clearChat(); if (r && r.context) showContext(r.context); });
+    });
+    $('btn-mute').addEventListener('click', function () {
+      if (!api) return;
+      api.set_mute(!muted).then(function (r) {
+        setMuteUi(!!r.muted);
+        if (r.muted && !r.daemon) addSystemLine('Stumm gemerkt, Sir — gilt, sobald der Sprach-Daemon verbunden ist.');
+      });
+    });
+    $('btn-stop').addEventListener('click', function () { if (api) api.cancel(); });
     $('btn-mic').addEventListener('click', function () { if (api) api.push_to_talk(); });
     $('btn-briefing').addEventListener('click', function () { if (api) api.request_briefing(); });
     input.addEventListener('focus', function () {

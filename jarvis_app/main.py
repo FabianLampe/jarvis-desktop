@@ -58,8 +58,8 @@ def _fail_webview2() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="J.A.R.V.I.S. Desktop-App")
     parser.add_argument("--config", default=str(core_config.default_config_path()))
-    parser.add_argument("--profile", choices=("dev", "home"),
-                        help="Konfig-Profil überschreiben")
+    parser.add_argument("--profile", choices=("dev", "home", "mac"),
+                        help="Konfig-Profil überschreiben (Standard: auto)")
     parser.add_argument("--debug", action="store_true",
                         help="WebView-Devtools aktivieren")
     args = parser.parse_args()
@@ -68,6 +68,14 @@ def main() -> None:
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s: %(message)s", datefmt="%H:%M:%S")
 
+    core_config.load_env_file()
+    from jarvis_core.platform import current as _cur
+    _logdir = _cur().data_dir() / "logs"; _logdir.mkdir(exist_ok=True)
+    _fh = logging.FileHandler(_logdir / "app.log", encoding="utf-8")
+    _fh.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s: %(message)s", "%H:%M:%S"))
+    logging.getLogger().addHandler(_fh)
+    from jarvis_core import singleton
+    singleton.require("jarvis_app", "J.A.R.V.I.S.")
     cfg = core_config.load(args.config, profile_override=args.profile)
 
     if not webview2_installed():
@@ -96,8 +104,10 @@ def main() -> None:
         frameless=True, easy_drag=False, transparent=True, on_top=True,
         resizable=False, shadow=False,
     )
-    webview.start(bridge.on_started, window,
-                  gui="edgechromium", debug=args.debug, http_server=True)
+    from jarvis_core.platform import current
+    from typing import Any, cast
+    gui = cast(Any, current().gui)            # cocoa (macOS) · edgechromium (Windows)
+    webview.start(bridge.on_started, (window,), gui=gui, debug=args.debug, http_server=True)
 
 
 if __name__ == "__main__":

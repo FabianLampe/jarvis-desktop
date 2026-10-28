@@ -1,13 +1,35 @@
-# J.A.R.V.I.S. Desktop-App — Laufzeit-Abhängigkeiten (Python 3.11, nativ, kein Docker)
+# J.A.R.V.I.S. Desktop-App — Laufzeit-Abhängigkeiten
+# Windows: Python 3.11 · macOS: Python 3.11–3.13 (getestet: 3.12, Apple Silicon)
+# Isolierte Umgebung: ./start_jarvis_mac.sh --setup (bzw. py -3.11 -m venv .venv)
 pywebview>=6.0
 psutil>=7.0
 PyYAML>=6.0
 websockets>=14.0
 requests>=2.32
+mcp>=1.20                  # MCP-Client für chrome-devtools-mcp (braucht Node/npx + Chrome)
 
-# Tagesbriefing — Gmail nur-lesen (GitHub/Wetter nutzen requests, schon vorhanden)
+# Tagesbriefing / Google Calendar (OAuth, nur bei aktivierter Integration nötig)
 google-api-python-client>=2.100
 google-auth-oauthlib>=1.2
+
+# Gedächtnis, Dokumente, Erinnerungen, Recherche, Mathematik
+markitdown[pdf,docx,pptx,xlsx]>=0.1   # lokale Dokumentenextraktion
+chromadb>=1.0                         # lokaler, persistenter Vektorspeicher
+fastembed>=0.5                        # ONNX-Embeddings (CPU), mehrsprachiges Modell
+APScheduler>=3.10,<4                  # 4.x ist upstream noch Vorabversion
+SQLAlchemy>=2.0,<3                    # dauerhafter APScheduler-JobStore (SQLite)
+tzdata                                # Europe/Berlin auch ohne System-Zeitzonendatenbank
+sympy>=1.13                           # lokale symbolische Mathematik
+trafilatura>=2.0                      # Artikeltext für Recherche mit Quellen
+
+# macOS-Adapter (nur dort installiert)
+pyobjc-framework-Vision>=10; sys_platform == "darwin"       # Bildschirm-OCR (Apple Vision, lokal)
+pyobjc-framework-Quartz>=10; sys_platform == "darwin"
+
+# Optionale Integrationen (nur laden, wenn aktiviert — siehe README)
+#   Spotify:   pip install spotipy
+#   Telegram:  pip install python-telegram-bot
+#   Discord:   pip install discord.py
 
 # Entwicklung/Tests
 pytest>=8.0

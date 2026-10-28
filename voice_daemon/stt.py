@@ -20,7 +20,8 @@ INITIAL_PROMPT = ("Gespräch auf Deutsch mit J.A.R.V.I.S., dem persönlichen "
 
 class Transcriber:
     def __init__(self, model: str = "small", language: str = "de",
-                 compute: str = "int8"):
+                 compute: str = "int8", threads: int = 0):
+        self.threads = int(threads)            # 0 = Bibliotheksstandard; 12 ≈ 2× schneller auf M-Serie
         self.model_name = model
         self.language = language
         self.compute = compute
@@ -34,15 +35,22 @@ class Transcriber:
 
         t0 = time.monotonic()
         log.info("Lade Whisper „%s“ (CPU, %s) …", self.model_name, self.compute)
-        self._model = WhisperModel(self.model_name, device="cpu",
-                                   compute_type=self.compute)
-        log.info("Whisper bereit (%.1f s)", time.monotonic() - t0)
+        try:
+            self._model = WhisperModel(self.model_name, device="cpu", compute_type=self.compute, cpu_threads=self.threads)
+        except Exception as exc:  # noqa: BLE001 — Download/Speicher: auf „small“ ausweichen statt stumm zu bleiben
+            if self.model_name == "small":
+                raise
+            log.warning("Whisper „%s“ nicht ladbar (%s) — nutze „small“", self.model_name, exc)
+            self.model_name = "small"
+            self._model = WhisperModel("small", device="cpu", compute_type=self.compute, cpu_threads=self.threads)
+        log.info("Whisper „%s“ bereit (%.1f s)", self.model_name, time.monotonic() - t0)
 
     def transcribe(self, audio_f32_16k: np.ndarray) -> str:
         """Erwartet mono float32 [-1,1] mit 16 kHz; liefert erkannten Text."""
         if audio_f32_16k.size < 1600:  # < 0,1 s
             return ""
         self.load()
+        assert self._model is not None
         t0 = time.monotonic()
         segments, info = self._model.transcribe(
             audio_f32_16k,

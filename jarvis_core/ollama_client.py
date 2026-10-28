@@ -38,6 +38,7 @@ class OllamaClient:
         self.host = host.rstrip("/")
         self._timeout = (connect_timeout, read_timeout)
         self._session = requests.Session()
+        self.last_usage: dict | None = None     # {"prompt": int, "completion": int} der letzten Antwort
 
     # ---------------------------------------------------------------- intern
 
@@ -96,6 +97,7 @@ class OllamaClient:
                     count, dur = data.get("eval_count"), data.get("eval_duration")
                     if count and dur:
                         tps = count / (dur / 1e9)
+                    self.last_usage = {"prompt": data.get("prompt_eval_count") or 0, "completion": count or 0}
                     yield {"done": True, "tps": tps, "eval_count": count}
                     return
         except (requests.ConnectionError, requests.Timeout,
@@ -121,6 +123,7 @@ class OllamaClient:
             if "not found" in err.lower():
                 raise ModelMissing(model)
             raise OllamaError(err)
+        self.last_usage = {"prompt": data.get("prompt_eval_count") or 0, "completion": data.get("eval_count") or 0}
         return data.get("message", {}) or {}
 
     def unload(self, model: str) -> bool:

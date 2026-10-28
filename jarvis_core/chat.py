@@ -33,16 +33,23 @@ MSG_STREAM_ABORT = " — Übertragung abgerissen, Sir; der Rest der Antwort ging
 class ChatService:
     """Hält den Gesprächsverlauf einer Sitzung und orchestriert die Schwerlast-Spur."""
 
-    def __init__(self, cfg: AppConfig, client: OllamaClient | None = None):
+    def __init__(self, cfg: AppConfig, client: OllamaClient | None = None,
+                 facts=None):
         self.cfg = cfg
         self.client = client or OllamaClient(cfg.ollama_host)
         self.history: list[dict[str, str]] = []
+        self.facts = facts          # Callable[[str], list[str]] | None — Gedächtnis-Fakten
 
     # ------------------------------------------------------------------ Chat
 
-    def send(self, text: str, force_7b: bool = False) -> Iterator[dict[str, Any]]:
+    def send(self, text: str, force_7b: bool = False,
+             model_override: str | None = None) -> Iterator[dict[str, Any]]:
+        """model_override: Schnellspur — kleineres Modell, solange Aufgaben das große belegen."""
+        from dataclasses import replace
         profile = self.cfg.profile
         decision = route(text, force_7b, profile)
+        if model_override and decision.lane != "heavy":
+            decision = replace(decision, model=model_override, reason="Schnellspur (Aufgabe läuft)")
         yield {
             "type": "route",
             "lane": decision.lane,
@@ -54,7 +61,14 @@ class ChatService:
         yield {"type": "state", "value": "think"}
 
         self.history.append({"role": "user", "content": text})
-        messages = messages_with_persona(self.history)
+        self._trim()
+        facts = None
+        if self.facts is not None:
+            try:
+                facts = self.facts(text)
+            except Exception:  # noqa: BLE001 — Gedächtnis darf den Chat nie blockieren
+                log.debug("Fakten nicht lesbar", exc_info=True)
+        messages = messages_with_persona(self.history, facts)
         heavy = decision.lane == "heavy"
 
         if heavy:
@@ -108,8 +122,45 @@ class ChatService:
         yield {"type": "done", "tps": tps, "text": "".join(parts)}
         yield {"type": "state", "value": "idle"}
 
+    # --------------------------------------------------------- Kontextfenster
+
+    @staticmethod
+    def est_tokens(text: str) -> int:
+        return int(len(text) / 3.3) + 4                     # grobe Schätzung für Deutsch
+
+    def _trim(self) -> int:
+        """Älteste Nachrichten verwerfen, bevor der Verlauf das Kontextfenster sprengt
+        (Ollama würde sonst still vorne abschneiden). Gibt die Zahl entfernter Nachrichten zurück."""
+        from .persona import SYSTEM_PROMPT
+        budget = int(self.cfg.profile.num_ctx * 0.7) - self.est_tokens(SYSTEM_PROMPT)
+        removed = 0
+        while len(self.history) > 2 and sum(self.est_tokens(m["content"]) for m in self.history) > budget:
+            self.history.pop(0); removed += 1
+        return removed
+
+    def context_info(self) -> dict[str, Any]:
+        """Belegung des Kontextfensters: gemessen (Ollama-Zähler) oder geschätzt."""
+        from .persona import SYSTEM_PROMPT
+        total = self.cfg.profile.num_ctx
+        usage = getattr(self.client, "last_usage", None)
+        if usage and self.history:
+            used, source = int(usage["prompt"]) + int(usage["completion"]), "gemessen"
+        else:
+            used = self.est_tokens(SYSTEM_PROMPT) + sum(self.est_tokens(m["content"]) for m in self.history)
+            source = "geschätzt"
+        return {"used": used, "total": total, "pct": min(100, round(used / total * 100)),
+                "messages": len(self.history), "source": source, "model": self.cfg.profile.general}
+
+    def remember_exchange(self, user: str, assistant: str) -> None:
+        """Werkzeug-Aufträge in den Verlauf aufnehmen, damit Folgefragen den Bezug haben."""
+        self.history.append({"role": "user", "content": user})
+        if assistant:
+            self.history.append({"role": "assistant", "content": assistant})
+
     def reset(self) -> None:
         self.history.clear()
+        if hasattr(self.client, "last_usage"):
+            self.client.last_usage = None
 
     # ---------------------------------------------------------------- intern
 

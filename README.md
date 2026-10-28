@@ -1,6 +1,6 @@
 # jarvis-desktop
 
-A local desktop assistant for Windows. An animated orb floats on the desktop; clicking it opens a chat panel. Requests are routed to local language models through Ollama, so nothing leaves the machine. An optional voice daemon adds a wake word, speech-to-text and speech output.
+A local personal assistant for macOS (Apple Silicon) and Windows. An animated orb floats on the desktop; clicking it opens a chat panel. Requests are routed to local language models through Ollama, so nothing leaves the machine. An optional voice daemon adds a wake word, speech-to-text and speech output.
 
 ## Features
 
@@ -9,24 +9,53 @@ A local desktop assistant for Windows. An animated orb floats on the desktop; cl
 - Browser control through the `chrome-devtools-mcp` server, using a separate Chrome profile
 - Daily briefing: open GitHub issues, unread Gmail (read-only), weather and system status
 - Orb rendered on canvas, with parameters configurable in `config.yaml`
+- **Tool control** (text and voice): terminal commands and scripts, files and folders, opening apps, system info, with bounded multi-step tasks. Deletions, admin commands and writes outside the workspace are shown in the UI and need an explicit confirmation bound to that exact action
+- **Memory**: facts and notes in SQLite (save / search / correct / forget)
+- **Document knowledge**: MarkItDown → FastEmbed (multilingual) → Chroma, answers cite file and location
+- **Reminders**: APScheduler 3.x with persistent storage, Europe/Berlin, missed ones reported on next start
+- **Research with sources**, **local maths** (SymPy), **screen OCR** (Apple Vision on macOS)
+- **Integrations** (each off by default): Google Calendar, Spotify, Home Assistant, Telegram, Discord
 
 ## Requirements
 
-- Windows 10 or 11 with the WebView2 runtime
-- Python 3.11
+- macOS 13+ (developed and verified on macOS 26, Apple Silicon, 48 GB) **or** Windows 10/11 with the WebView2 runtime
+- Python 3.11 (Windows) · 3.11–3.13 (macOS; 3.12 verified)
 - [Ollama](https://ollama.com) running on `127.0.0.1:11434`
-  - profile `home`: `gemma3:4b` and `qwen2.5:7b`
+  - profile `mac` (auto-selected on macOS): `qwen2.5:14b` (chat, coder, tool agent), `qwen3.6:35b` (heavy lane)
+  - profile `home` (Windows, GTX 1660 Ti): `qwen2.5:3b` and `qwen2.5:7b`
   - profile `dev`: `qwen3.5:0.8b`
+  - pick models that fit your machine: `./start_jarvis_mac.sh --check` lists what is missing
 - Node.js and Chrome for browser control (optional)
 
 ## Setup
+
+macOS:
+
+```sh
+./start_jarvis_mac.sh --setup      # creates .venv, installs requirements (+ voice), runs the check
+```
+
+Windows:
 
 ```bat
 py -3.11 -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
+Everything is installed into `.venv` only; no system upgrades. First use of document search downloads the embedding model (~1 GB, once).
+
 ## Usage
+
+macOS:
+
+```sh
+./start_jarvis_mac.sh               # desktop app (profile auto = mac)
+./start_jarvis_mac.sh --daemon      # voice daemon (second terminal)
+./start_jarvis_mac.sh --cli "Lege einen Ordner Test an"   # no GUI, confirmations asked in the terminal
+./start_jarvis_mac.sh --check       # environment + model check
+```
+
+Windows:
 
 ```bat
 start_jarvis.bat                  :: profile from config.yaml
@@ -54,12 +83,87 @@ Triggered by double clap, the voice command "Briefing", or the button in the pan
 - Gmail: place an OAuth client in `.secrets/credentials.json`, then run `python -m jarvis_core.briefing.gmail --login`
 - Weather: set the location under `briefing.weather` in `config.yaml`
 
+## Panel controls
+
+- **MIC** (panel header): mutes the microphone. The voice daemon closes the audio stream (the macOS recording indicator goes off), so Jarvis hears nothing, no wake word, no clap, no recording. Click again to listen. The state survives a daemon restart. Jarvis can still speak (reminders, replies to typed input).
+- **NEU**: starts a new chat — cancels running actions and speech, clears the history and resets the context meter. Voice: "Neuer Chat".
+- **KONTEXT** (status bar + bar): tokens used of the model's context window (`num_ctx`), measured from Ollama (or estimated before the first answer). Yellow from 70 %, red from 90 %; Jarvis warns at 85 %. History is trimmed automatically at ~70 % so Ollama never silently cuts the start.
+- **■**: stops all running actions and speech.
+- **Parallel tasks**: every tool job runs as its own task, several at once (commands, research, documents … — LLM text generation itself is served one request at a time by Ollama). A task list above the chat shows each running task with its current step and a ✕ to cancel just that one. Ask "Was machst du gerade?" for an honest status; "Brich Aufgabe 2 ab" / "Brich alles ab" cancels. For long voice-started tasks Jarvis says what he is still doing every ~30 s, and prefixes announcements with "Aufgabe N" when several run.
+- **Weather**: "Wie wird das Wetter heute / morgen / in Berlin?" (Open-Meteo, no key, home location from `briefing.weather`).
+- **Follow-ups**: "Ja", "Mach das", "Bitte" after an offer runs the previous request instead of being ignored.
+
+Only one app and one daemon can run: a second start exits with a message (lock files in the data folder).
+Jarvis ignores its own voice coming back through the speakers (echo filter, 0.8 s quiet tail after speaking, queued speech so briefing lines are not heard between each other). The double-clap trigger is off by default (`clap_enabled`).
+Logs: `~/Library/Application Support/Jarvis/logs/{app,daemon}.log`.
+
+## macOS permissions
+
+Only enable what a feature needs. macOS asks on first use; grant it to the app that starts Jarvis (Terminal / iTerm).
+
+| Permission | Needed for | Where |
+|---|---|---|
+| Microphone | voice daemon (wake word, push-to-talk) | Privacy & Security → Microphone |
+| Screen & System Audio Recording | `screen_ocr` only | Privacy & Security → Screen & System Audio Recording |
+| Notifications | reminder banners (`osascript` notifications) | System Settings → Notifications |
+| Accessibility | **not used** (no UI scripting) | – |
+| Automation | **not used** unless you add AppleScript control of other apps | – |
+
+Admin commands (`sudo …`) are shown for confirmation and then run through the native macOS administrator dialog.
+
+## Tools and safety
+
+- **Workspace**: `~/Jarvis` (override with `tools.workspace` or `JARVIS_WORKSPACE`). Reads work anywhere except protected paths (`~/.ssh`, Keychains, `.secrets`, `.env`, Jarvis data). Writes inside the workspace run directly.
+- **Needs confirmation** (card in the panel showing the exact action): deleting, `rm`/`mv`/`kill`/`sudo`, inline code (`python -c`), `git push/reset…`, writes outside the workspace, explicit shell syntax (`run_shell`), killing processes, creating calendar events, risky smart-home domains (locks, covers…).
+- **Untrusted content**: web pages, documents, files and command output are marked as data. After reading any of them in a task, commands, memory/reminder changes, outgoing messages and smart-home actions need confirmation too, so a poisoned page cannot grant permissions.
+- **Honest results**: success is reported only when the tool result says so; failures, timeouts and cancellations are reported as such. Commands run without a shell (argument lists), with timeout (default 60 s, max 600 s), output limits and a stop button (■).
+- **Telegram** (if enabled) only accepts your own chat and can never confirm risky actions.
+
+## Memory, documents, reminders
+
+- Say "Merk dir, dass …", "Was weißt du über …", "Vergiss …" (forgetting asks for confirmation).
+- "Lies das Dokument Vertrag.pdf in meine Wissensbasis ein" then "Was steht in meinen Dokumenten zur Kündigungsfrist?" → answer plus `file — page/slide, section, lines`.
+- "Erinnere mich morgen um 9 Uhr an …", "jeden Montag um 8 Uhr …". **Reminders are only delivered while Jarvis is running and the Mac is awake**; anything that came due while it was off is announced as *missed* on the next start. Jarvis cannot wake the Mac.
+- Data lives in `~/Library/Application Support/Jarvis` (`memory.db`, `reminders.db`, `scheduler.sqlite`, `chroma/`, `models/`).
+
+## Integrations
+
+Set `integrations.<name>.enabled: true` in `config.yaml` and put credentials in `.env` (never committed). Ask Jarvis "Welche Integrationen sind eingerichtet?" for the status.
+
+| Integration | Credentials | Notes |
+|---|---|---|
+| Google Calendar | OAuth desktop client → `.secrets/credentials.json`, then `python -m jarvis_core.integrations.services calendar-login` | read upcoming events, create events (confirmed) |
+| Spotify | `JARVIS_SPOTIFY_CLIENT_ID`, redirect `http://127.0.0.1:8888/callback`, then `… services spotify-login` | playback control needs Premium + active device |
+| Home Assistant | `JARVIS_HA_URL`, `JARVIS_HA_TOKEN` | states + service calls |
+| Telegram | `JARVIS_TELEGRAM_TOKEN`, `JARVIS_TELEGRAM_CHAT_ID` | send + receive from your own chat |
+| Discord | `JARVIS_DISCORD_TOKEN`, `JARVIS_DISCORD_CHANNEL_ID` | send only |
+
+Optional modules: SearXNG (`research.searxng_url`), offline translation (`pip install argostranslate`), face recognition (deliberately **not implemented**, see ADR 0004). WhatsApp is not integrated (see ADR 0004).
+
+## Voice on macOS
+
+`./start_jarvis_mac.sh --daemon`. `tts_engine: auto` uses edge-tts (online) on the Mac. Alternatives: `voicebox` = local [Voicebox](https://github.com/jamiepine/voicebox) server for a cloned voice (see below), `system` = built-in `say` (offline, clearly different from the film voice), `xtts` = cloned voice. XTTS was measured on Apple Silicon: CPU real-time factor ≈ 0.6 (faster than real time), MPS ≈ 2.2 (slower), so keep `xtts_device: cpu`. Install with `./start_jarvis_mac.sh --xtts`; create the reference from your recording with `./start_jarvis_mac.sh --voice-ref "Jarvis voice.mp3"` → `voice_daemon/assets/jarvis_reference.wav` (film material, not in the repo; without it Jarvis falls back to edge-tts, then to `say`). **Voicebox** (MIT, local voice-cloning studio with REST API): install and start the Voicebox app, create a voice profile from your reference recording there, then set in `config.yaml`:
+
+```yaml
+voice:
+  tts_engine: "voicebox"
+  voicebox_profile: "Jarvis"      # profile name or id (empty = first profile)
+  voicebox_engine: null           # optional engine choice inside Voicebox
+```
+
+Jarvis calls `POST http://127.0.0.1:17493/generate/stream` sentence by sentence (so the orb and captions stay in sync). If Voicebox is not running or errors, it falls back to edge-tts and then to `say`. `./start_jarvis_mac.sh --check` reports whether the server is reachable. German quality depends on the engine you pick in Voicebox (its page does not list German explicitly) — listen to it in the Voicebox app first.
+Status: the adapter is tested against a local stand-in server that mimics the documented endpoints; it has **not** been run against a real Voicebox install.
+
+If port 8765 is taken by another program, the app automatically uses the next free port (up to +9) and the daemon finds it.
+
 ## Project layout
 
 ```
 jarvis_app/     desktop front end (pywebview), JS bridge, WebSocket server for the daemon
 jarvis_core/    UI-independent core: config, persona, router, Ollama client, chat, system monitor,
-                browser agent and tools, briefing
+                platform/ (mac + windows adapters), tools/ (registry, files, shell, system, research, …),
+                toolagent.py (multi-step tool control), memory/ (SQLite, documents, reminders),
+                integrations/, browser agent, briefing, cli.py, doctor.py
 voice_daemon/   wake word, speech-to-text, speech output, WebSocket link
 config.yaml     profiles (dev, home), orb parameters, voice and browser settings
 docs/           architecture decisions (ADRs) and design specs
@@ -71,8 +175,11 @@ The app and the voice daemon communicate over a local WebSocket (`ws://127.0.0.1
 ## Development
 
 ```bat
-.venv\Scripts\python.exe -m pytest tests\ -q
+.venv\Scripts\python.exe -m pytest tests\ -q       :: Windows
+.venv/bin/python -m pytest tests -q                  # macOS
 ```
+
+`pytest -m "not integration"` skips the tests that start the real Chrome DevTools MCP server.
 
 The UI can be viewed without the app by opening `jarvis_app/ui/preview.html` in a browser (mocked bridge).
 

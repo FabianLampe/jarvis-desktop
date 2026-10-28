@@ -41,7 +41,7 @@ def _narrate(tool: str, args: dict) -> str:
     if tool == "navigate":
         return {"back": "Ich gehe zurück, Sir.", "forward": "Ich gehe vor, Sir.",
                 "reload": "Ich lade die Seite neu, Sir."}.get(
-                    args.get("action"), "Sehr wohl, Sir.")
+                    str(args.get("action")), "Sehr wohl, Sir.")
     if tool == "read_page":
         return "Einen Moment, Sir — ich sehe mir die Seite an."
     if tool == "click":
@@ -130,7 +130,7 @@ class BrowserAgent:
             yield {"type": "done",
                    "text": "Das habe ich als Browser-Befehl nicht verstanden, Sir."}
             return
-        messages = [
+        messages: list[dict[str, Any]] = [
             {"role": "system", "content": SYSTEM_PROMPT +
              "\nDu kannst den Browser über die bereitgestellten Werkzeuge steuern. "
              "Nutze sie für Web-Aufgaben und antworte sonst normal."},

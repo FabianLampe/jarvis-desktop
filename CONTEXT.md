@@ -33,7 +33,27 @@ Gemessene Modell-Performance: 7B → ~17 Tok/s (mit CPU-Offload) · 3B → **~87
 
 ---
 
+## Hardware-Realität Mac (gemessen, 2026-10-28)
+
+| Komponente | Wert | Konsequenz |
+|---|---|---|
+| Chip/RAM | Apple M5 Pro, 18 Kerne, **48 GB Unified Memory** | kein VRAM-Limit wie beim Windows-PC; ~14B resident, 35B als Schwerlast |
+| OS/Tools | macOS 26.5, Python 3.12 (Homebrew), Node 26, Ollama 0.40 | venv `.venv` mit 3.12; Windows bleibt 3.11 |
+| Werkzeug-Modell | `qwen2.5:14b`: mehrstufige Aufgabe ≈ 16 s; `qwen3:8b` ≈ 32 s (Denkmodus) | Profil `mac`: `qwen2.5:14b` für Chat, Coder und Werkzeugagent |
+| XTTS | CPU RTF **0,6**, MPS RTF 2,2 (torch 2.8.0) | `xtts_device: cpu` auf dem Mac; Referenz-WAV fehlt hier (`--voice-ref` erzeugt sie aus der mp3) ⇒ Fallback edge → `say`; XTTS-Pakete in `.venv` installiert, Ende-zu-Ende mit Test-Referenz gelaufen |
+
+Die GPU-/Modellannahmen der Windows-Tabelle oben gelten **nur** für das Profil `home`.
+
 ## Glossar (Domänensprache)
+
+- **Plattformadapter** — `jarvis_core/platform/`: gemeinsame Schnittstelle, getrennte Adapter für macOS und Windows
+  (Programmstart, Benachrichtigung, OCR, Systemstimme, Prozessabbruch, GPU, Datenordner).
+- **Werkzeugsteuerung** — Registry + `ToolAgent`: ein begrenzter Mehrschritt-Ablauf (`tools.max_steps`) über alle
+  Werkzeuggruppen; pro Anfrage werden nur passende Gruppen (Schlüsselwörter) ans Modell gegeben.
+- **Bestätigung** — UI-Karte mit der konkreten Aktion; gebunden an eine ID, einmalig, verfällt nach 120 s.
+- **Taint / Fremdinhalt** — Webseiten, Dokumente, Dateien und Befehlsausgaben sind Daten. Wurde etwas davon im Auftrag
+  gelesen, werden Befehle, Gedächtnis-/Erinnerungsänderungen und ausgehende Nachrichten bestätigungspflichtig.
+- **Arbeitsordner** — `~/Jarvis`; dort schreibt Jarvis ohne Rückfrage.
 
 - **Router** — leichte Instanz, die jede Anfrage klassifiziert und den passenden **Spezialisten** wählt.
   Wählt **automatisch** zwischen den residenten 3B (Coder ↔ Allrounder); die teure 7B-**Schwerlast-Spur**
@@ -170,6 +190,19 @@ wird angesagt; Antwort läuft über den bestehenden Caption/TTS-Pfad. Spec/Plan:
 `docs/superpowers/plans/2026-06-15-jarvis-browser-control.md`. Integrationstest
 gegen echten Server grün (Chrome headless: öffnen+lesen+schließen). Bewusst
 nicht in V1: voll-autonome Mehrschritt-Aufgaben, echter Chrome, Domain-Allowlist.
+
+**Umgesetzt (2026-10-28): macOS-Linie** ([ADR 0004](docs/adr/0004-macos-und-werkzeugsteuerung.md)):
+Plattformadapter (mac/windows), Profil `mac` (`profile: auto`), `start_jarvis_mac.sh`, `jarvis_core.doctor`,
+Werkzeugsteuerung (Terminal ohne Shell, Dateien, Systeminfo, App-Start, Prozesse) mit Bestätigungen in der UI und Stopp-Knopf,
+Gedächtnis (SQLite/FTS5), Dokumentensuche (MarkItDown → FastEmbed `paraphrase-multilingual-mpnet-base-v2` → Chroma, mit
+Datei + Seite/Folie + Überschrift + Zeilen), Erinnerungen (APScheduler 3.x, SQLite-JobStore, Europe/Berlin, verpasste
+Termine), Recherche mit Quellen (DuckDuckGo/SearXNG + Trafilatura, SSRF-Schutz), SymPy im isolierten Prozess,
+Bildschirm-OCR (Apple Vision), Integrationen Google Calendar / Spotify / Home Assistant / Telegram / Discord mit
+Einrichtungsstatus. `config.yaml` repariert (fehlendes `home:`-Profil, doppelte Schlüssel; Loader lehnt Duplikate ab).
+`BrowserController` an chrome-devtools-mcp (neue `pageId`-Pflicht) und mcp-SDK 2.x (`is_error`) angepasst.
+Sprachausgabe: `tts_engine: voicebox` (lokaler Voicebox-Server, `POST /generate/stream`, Kette voicebox → edge → `say`), nur gegen einen Stand-in-Server getestet.
+Offen/nicht gebaut: Gesichtserkennung (bewusst), WhatsApp (bewertet, abgelehnt), Discord-Empfang, Offline-Übersetzung
+ungetestet. Odysseus bleibt Referenz (AGPL-Hinweis, ADR 0004) — ADR 0003 gilt für diese Linie nicht mehr.
 
 ## Umsetzungs-Reihenfolge (V1)
 

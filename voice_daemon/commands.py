@@ -75,3 +75,27 @@ def is_briefing(text: str) -> bool:
     """Erkennt den Wunsch nach dem Tagesbriefing (Sprach-Fallback zum Klatsch)."""
     norm = _normalize(text)
     return any(p in norm for p in _BRIEFING)
+
+
+def _norm(t: str) -> str:
+    import re
+    return re.sub(r"[^a-zäöüß0-9 ]", "", t.lower()).strip()
+
+
+def is_own_echo(heard: str, recent: list[str], min_ratio: float = 0.75) -> bool:
+    """True, wenn die erkannte „Äußerung“ Jarvis' eigene, gerade gesprochene Ausgabe ist
+    (Lautsprecher → Mikrofon). Vergleicht unscharf mit den letzten gesprochenen Texten."""
+    from difflib import SequenceMatcher
+    h = _norm(heard)
+    if len(h) < 8:
+        return False
+    for r in recent:
+        n = _norm(r)
+        if h in n or SequenceMatcher(None, h, n[: max(len(h) * 2, 40)]).ratio() >= min_ratio:
+            return True
+        # Teilstück: bestes Fenster gleicher Länge innerhalb des gesprochenen Textes
+        w = len(h)
+        best = max((SequenceMatcher(None, h, n[i:i + w]).ratio() for i in range(0, max(1, len(n) - w + 1), max(1, w // 3))), default=0)
+        if best >= 0.8:
+            return True
+    return False

@@ -1,4 +1,4 @@
-"""System-Monitor: CPU/RAM via psutil, VRAM via nvidia-smi (nur home-Profil).
+"""System-Monitor: CPU/RAM via psutil, VRAM über den Plattformadapter (nvidia-smi nur unter Windows).
 
 Auf dem dev-PC (gpu_monitor: false) bleibt VRAM None → Statusleiste zeigt „VRAM —".
 Schlägt nvidia-smi einmal mit „nicht gefunden" fehl, wird es nicht erneut versucht.
@@ -7,19 +7,19 @@ Schlägt nvidia-smi einmal mit „nicht gefunden" fehl, wird es nicht erneut ver
 from __future__ import annotations
 
 import logging
-import subprocess
-import sys
 from typing import Any, Optional
 
 import psutil
 
-log = logging.getLogger("jarvis.sysmon")
+from .platform import current as current_platform
 
-_CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+log = logging.getLogger("jarvis.sysmon")
 
 
 class SystemMonitor:
-    def __init__(self, gpu_monitor: bool):
+    def __init__(self, gpu_monitor: bool, platform=None):
+        self._platform = platform or current_platform()
+        self._misses = 0
         self._gpu = gpu_monitor
         psutil.cpu_percent(interval=None)  # Erstaufruf liefert sonst 0.0
 
@@ -42,21 +42,14 @@ class SystemMonitor:
         return out
 
     def _vram(self) -> Optional[tuple[int, int]]:
-        try:
-            r = subprocess.run(
-                ["nvidia-smi", "--query-gpu=memory.used,memory.total",
-                 "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=3,
-                creationflags=_CREATE_NO_WINDOW,
-            )
-            if r.returncode != 0:
-                return None
-            used, total = (int(x.strip()) for x in r.stdout.splitlines()[0].split(","))
-            return used, total
-        except FileNotFoundError:
-            log.info("nvidia-smi nicht gefunden — VRAM-Anzeige deaktiviert")
-            self._gpu = False
-            return None
-        except (subprocess.TimeoutExpired, ValueError, IndexError) as exc:
-            log.debug("nvidia-smi-Lesefehler: %s", exc)
-            return None
+        """Dedizierter GPU-Speicher über den Plattformadapter (Windows: nvidia-smi;
+        macOS: Unified Memory ⇒ keine eigene VRAM-Anzeige)."""
+        v = self._platform.gpu_status()
+        if v is None:
+            self._misses += 1
+            if self._misses >= 3:
+                log.info("Kein GPU-Speicher abfragbar — VRAM-Anzeige deaktiviert")
+                self._gpu = False
+        else:
+            self._misses = 0
+        return v

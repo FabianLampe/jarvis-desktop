@@ -1,6 +1,8 @@
 # J.A.R.V.I.S. — Konfiguration
-# Profile: dev (Arbeits-PC, Radeon, kein 7B) | home (GTX 1660 Ti, F:-NVMe, 7B-Schwerlast)
-profile: home
+# Profile: dev (Arbeits-PC, Radeon, kein 7B) | home (Windows, GTX 1660 Ti, 7B-Schwerlast)
+#          mac (Apple Silicon, Unified Memory)
+# auto = mac auf macOS, sonst home
+profile: auto
 
 # Fensterhintergrund: dark = durchgehend dunkle Fläche (gut bei hellem Wallpaper)
 #                     transparent = nur der Orb schwebt, Desktop scheint durch
@@ -44,12 +46,24 @@ briefing:                  # Tagesbriefing (Doppelklatsch / „Briefing" / Panel
 voice:                     # Sprach-Daemon (start_daemon.bat)
   wake_word: "hey_jarvis"  # vortrainiertes openWakeWord-Modell — akzent-robust
   wake_threshold: 0.55     # 0–1; niedriger = empfindlicher
-  interrupt_threshold: 0.32 # „Hey Jarvis“ mitten in seine Antwort = unterbrechen (niedrig = empfindlich)
-  stt_model: "small"       # faster-whisper auf CPU (keine VRAM-Konkurrenz)
+  interrupt_threshold: 0.6  # „Hey Jarvis“ mitten in seine Antwort = unterbrechen (niedrig = empfindlich)
+  stt_model: "large-v3-turbo"  # faster-whisper auf CPU; genauer als "small" (Fallback automatisch), ~1,5 s je Befehl
+  stt_threads: 12          # CPU-Threads der Spracherkennung (0 = Standard); 12 ≈ 2× schneller
   stt_language: "de"       # Deutsch erzwungen — kein Auto-Detect mehr
-  tts_engine: "xtts"       # xtts = geklonte Film-Stimme · edge = schnelle Neural-Stimme (Internet)
+  tts_engine: "qwen"       # qwen = Qwen3-TTS (MLX, .venv-qwen) · auto = xtts, sobald Referenz-WAV + coqui-tts da sind, sonst edge · xtts · voicebox (lokaler Server) · edge (Internet) · system (offline: macOS `say`)
   xtts_speaker_wav: "voice_daemon/assets/jarvis_reference.wav"  # aus „Jarvis voice.mp3"
-  xtts_device: "auto"      # auto | cuda | cpu — cuda: RTF ~0,6, teilt sich das VRAM mit dem LLM
+  xtts_device: "auto"      # auto | cuda | mps | cpu — macOS: cpu ist am schnellsten (RTF ~0,6, gemessen); mps RTF ~2 — cuda: RTF ~0,6, teilt sich das VRAM mit dem LLM
+  qwen_ref_audio: "voice_daemon/assets/jarvis_reference.wav"   # tts_engine: qwen — Referenz (./start_jarvis_mac.sh --voice-ref)
+  qwen_ref_text: ""        # exakter Text der Referenz; leer ⇒ wird per Whisper erkannt (bei Fehlern hier korrigieren)
+  qwen_language: "german"
+  effects_chain:           # Jarvis-Effekt: gleicher Chorus wie in Voicebox (Pedalboard) — [] = aus
+    - { type: chorus, enabled: true, params: { rate_hz: 0.2, depth: 0.8, feedback: 0.35, centre_delay_ms: 7.0, mix: 0.5 } }
+  voicebox_url: "http://127.0.0.1:17493"   # tts_engine: voicebox — lokaler Voicebox-Server (App starten)
+  voicebox_profile: "Jarvis"                    # Name/ID des geklonten Jarvis-Profils (in der Voicebox-App anlegen)
+  voicebox_effects: "profile"               # Effektkette („Robotic“ o. ä.) aus dem Voicebox-Profil 1:1 mitsenden; none = aus
+  voicebox_seed: null                       # fester Seed für reproduzierbaren Klang (optional)
+  voicebox_engine: "chatterbox"                     # optional, z. B. Qwen3-TTS oder Chatterbox Multilingual
+  system_voice: "Reed (Deutsch (Deutschland))"   # tts_engine: system (macOS `say -v ?` zeigt alle) — Ausweichpfad, klingt nicht wie Film-Jarvis
   tts_voice: "de-DE-FlorianMultilingualNeural"  # Alternativen: de-DE-KillianNeural, de-DE-ConradNeural
   tts_rate: "-8%"          # gemessenes Sprechtempo — der Film-Jarvis hetzt nie
   tts_pitch: "-3Hz"        # einen Hauch tiefer
@@ -60,9 +74,9 @@ voice:                     # Sprach-Daemon (start_daemon.bat)
   output_device: null
   beep: true               # kurzer Ton, wenn Jarvis zuhört
   max_utterance_s: 14.0
-  silence_after_s: 0.9
-  follow_up_s: 6.0         # Gesprächsmodus: nach der Antwort weiterzuhören (0 = aus)
-  clap_enabled: true       # Doppelklatsch löst das Tagesbriefing aus
+  silence_after_s: 1.3
+  follow_up_s: 5.0         # Gesprächsmodus: nach der Antwort weiterzuhören (0 = aus)
+  clap_enabled: false      # Doppelklatsch löst das Tagesbriefing aus
   clap_threshold: 4.0      # RMS-Vielfaches über Grundpegel (höher = unempfindlicher)
   clap_gap_min_s: 0.15     # Mindestabstand der zwei Klatscher
   clap_gap_max_s: 0.8      # Höchstabstand
@@ -75,6 +89,7 @@ profiles:
     heavy: null            # kein 7B ⇒ Schalter ausgeblendet, Status "NICHT VERFÜGBAR"
     gpu_monitor: false     # kein nvidia-smi ⇒ "VRAM —"
     num_ctx: 2048
+  home:
     # Entscheidung 2026-06-15: geklonte XTTS-Stimme auf der GPU (2,9 GB) hat
     # Vorrang (Nutzerwunsch). Daneben passt nur EIN kleines LLM ins 6-GB-VRAM
     # → qwen2.5:3b (1,9 GB) für beide Spuren, warm 0,2 s / 75 T/s. gemma3:4b
@@ -85,3 +100,50 @@ profiles:
     heavy: "qwen2.5:7b"
     gpu_monitor: true
     num_ctx: 2048
+  mac:
+    # Apple Silicon (M5 Pro, 48 GB Unified Memory) — gemessen 2026-10-28, siehe README.
+    # Ein mittleres Modell bleibt resident; Werkzeugaufrufe laufen über `agent`.
+    general: "qwen2.5:14b"
+    coder: "qwen2.5:14b"
+    agent: "qwen2.5:14b"    # Modell mit zuverlässigem Tool-Calling
+    quick: "qwen2.5:7b"     # Schnellspur: beantwortet Zwischenfragen, solange eine Aufgabe das große Modell belegt
+    heavy: "qwen3.6:35b"    # Schwerlast-Spur: größeres Modell (22 GB) nur auf Ansage
+    gpu_monitor: false      # kein nvidia-smi; RAM-Anzeige deckt Unified Memory ab
+    num_ctx: 8192
+
+# Werkzeugsteuerung (Terminal, Dateien, Gedächtnis, Dokumente, Erinnerungen)
+tools:
+  enabled: true
+  workspace: null          # null ⇒ ~/Jarvis (Windows: %USERPROFILE%\Jarvis); dort darf Jarvis ohne Rückfrage schreiben
+  max_steps: 6
+  shell_timeout_s: 60
+  max_timeout_s: 600
+  max_output_chars: 6000
+  confirm_ttl_s: 120
+  data_dir: null           # null ⇒ ~/Library/Application Support/Jarvis (Windows: %APPDATA%\Jarvis)
+
+knowledge:                 # lokale Dokumentensuche (MarkItDown → FastEmbed → Chroma)
+  embedding_model: "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+  chunk_chars: 900
+  chunk_overlap: 150
+  top_k: 4
+
+reminders:
+  timezone: "Europe/Berlin"
+  misfire_grace_s: 86400   # verpasste Erinnerungen werden bis zu 24 h später als „verpasst" gemeldet
+
+research:
+  searxng_url: null        # optional, z. B. "http://127.0.0.1:8080"; sonst DuckDuckGo
+  max_sources: 4
+  max_chars_per_source: 3000
+
+# Integrationen — jede einzeln aktivierbar. Zugangsdaten stehen in .env (nie hier).
+integrations:
+  google_calendar: { enabled: false }   # .secrets/credentials.json + Login, siehe README
+  spotify:         { enabled: false }   # JARVIS_SPOTIFY_CLIENT_ID (+ Login)
+  home_assistant:  { enabled: false }   # JARVIS_HA_URL, JARVIS_HA_TOKEN
+  telegram:        { enabled: false }   # JARVIS_TELEGRAM_TOKEN, JARVIS_TELEGRAM_CHAT_ID
+  discord:         { enabled: false }   # JARVIS_DISCORD_TOKEN, JARVIS_DISCORD_CHANNEL_ID
+  # Optionale Module
+  translation:     { enabled: false }   # Offline-Übersetzung (argostranslate)
+  face_recognition: { enabled: false }  # nicht implementiert — siehe README

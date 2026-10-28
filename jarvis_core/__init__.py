@@ -5,4 +5,4 @@ System-Monitor und Konfiguration. Keine Importe aus jarvis_app — der Kern ist
 später direkt vom Odysseus-Fork oder dem Sprach-Daemon nutzbar.
 """
 
-__all__ = ["config", "persona", "router", "ollama_client", "sysmon", "chat"]
+# Module: config, persona, router, ollama_client, sysmon, chat, toolagent, tools, memory, platform
