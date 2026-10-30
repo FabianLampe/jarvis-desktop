@@ -47,6 +47,10 @@ Du erledigst Aufgaben mit Werkzeugen. Regeln:
    Nutze bei Bedarf ein lesendes Werkzeug zum Prüfen (z. B. Datei erneut lesen / Test ausführen).
    Korrigiere Fehler innerhalb des Budgets. Wiederhole nie blind dieselbe fehlgeschlagene Aktion.
    Beschreibe offene Teilziele ausdrücklich; erfolgreiche Einzelwerkzeuge beweisen nicht das Gesamtziel.
+8. Vor Browser-Klicks/Texteingaben browser_snapshot abrufen; Element-IDs niemals raten.
+   Für Mac-Apps mac_ui_snapshot verwenden. Nach UI-Aktionen Snapshot erneuern.
+9. Für neue Workflows bei Bedarf tool_catalog abrufen. Workflows speichern nur feste,
+   konkrete Werkzeugargumente, keine Programmtexte oder versteckten Berechtigungen.
 Arbeitsordner: {workspace}. Relative Pfade gelten dort. Jetzt: {now} (Europe/Berlin).
 {facts}"""
 
@@ -96,6 +100,26 @@ class ToolAgent:
 
     def _step(self, name: str, args: dict, outcomes: list, sources: list) -> Iterator[dict]:
         """Bewertet, bittet ggf. um Bestätigung, führt aus. Setzt outcomes[-1]."""
+        if name == "workflow_run":
+            from .tools.workflow_tools import load_workflow
+            from .tools.registry import ToolError
+            try:
+                recipe = load_workflow(self.ctx, args.get("name", ""))
+            except (ToolError, ValueError, OSError) as exc:
+                outcomes.append({"tool": name, "ok": False, "text": str(exc), "final": True})
+                yield {"type": "result", "tool": name, "ok": False, "text": str(exc)}
+                return
+            # Keine versteckte Ausführung im Handler: jede Einzelaktion läuft durch _step.
+            for step in recipe["steps"]:
+                if self.ctx.cancel.is_set():
+                    return
+                if len(outcomes) >= max(1, self.cfg.tools.max_steps):
+                    outcomes.append({"tool": name, "ok": False, "text": "Schrittlimit im Workflow erreicht", "final": True})
+                    return
+                yield from self._step(step["tool"], step["args"], outcomes, sources)
+                if outcomes and not outcomes[-1]["ok"]:
+                    return
+            return
         tool = self.reg.get(name)
         if tool is None:
             outcomes.append({"tool": name, "ok": False, "text": f"Unbekanntes Werkzeug: {name}"})
@@ -238,7 +262,9 @@ class ToolAgent:
                 o = outcomes[-1] if len(outcomes) > n0 else {"ok": False, "text": "Abgebrochen"}
                 messages.append({"role": "tool", "name": fn,
                                  "tool_name": fn,
-                                 "content": ("OK: " if o["ok"] else "FEHLER: ") + o["text"]})
+                                 "content": ("OK: " if o["ok"] else "FEHLER: ") + (
+                                     "\n".join(f"{v['tool']}: {v['text']}" for v in outcomes[n0:])
+                                     if fn == "workflow_run" else o["text"])})
                 if o.get("declined"):
                     return                         # Nutzer hat abgelehnt: nichts weiter versuchen
                 if not o["ok"] and self.cfg.profile.reasoning and wants_reasoning(

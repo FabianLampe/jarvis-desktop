@@ -168,6 +168,7 @@ class AppConfig:
     ws_port: int = 8765
     window_bg: str = "dark"  # dark | transparent
     reasoning: ReasoningConfig = field(default_factory=ReasoningConfig)
+    extensions: dict[str, Any] = field(default_factory=dict)
 
 
 class ConfigError(ValueError):
@@ -312,6 +313,13 @@ def load(path: str | Path | None = None,
     mode = ("on" if mode else "off") if isinstance(mode, bool) else str(mode).lower()
     reasoning = ReasoningConfig(mode=mode, max_tokens=int(rr.get("max_tokens", 2048)),
                                 timeout_s=float(rr.get("timeout_s", 120)))
+    extensions = raw.get("extensions") or {}
+    if not isinstance(extensions, dict):
+        raise ConfigError("extensions muss eine YAML-Zuordnung sein")
+    for key in ("ssh", "mcp", "mac_ui"):
+        section = extensions.get(key) or {}
+        if not isinstance(section, dict) or not isinstance(section.get("enabled", False), bool):
+            raise ConfigError(f"extensions.{key}: Zuordnung mit enabled: true|false erwartet")
 
     return AppConfig(
         profile=Profile(
@@ -328,6 +336,7 @@ def load(path: str | Path | None = None,
         tools=tools, knowledge=knowledge, reminders=reminders, research=research,
         integrations=integrations,
         reasoning=reasoning,
+        extensions=extensions,
         orb=orb,
         voice=voice,
         browser=browser,

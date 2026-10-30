@@ -40,6 +40,7 @@ class ToolResult:
     ok: bool
     text: str
     data: Optional[dict] = None
+    structured: bool = False
 
 
 @dataclass(frozen=True)
@@ -210,7 +211,19 @@ class ToolRegistry:
             res = ToolResult(True, str(res))
         if tool.untrusted:
             ctx.tainted = True
-        res.text = clip(res.text, max_chars)
+        if res.structured and len(res.text) > max_chars:
+            # Strukturierte Erweiterungen dürfen durch Text-Clipping kein kaputtes JSON liefern.
+            scalar = {k: v for k, v in (res.data or {}).items()
+                      if isinstance(v, (int, float, bool)) or v is None}
+            preview = res.text
+            while True:
+                encoded = json.dumps({**scalar, "ok": res.ok, "truncated": True, "preview": preview}, ensure_ascii=False)
+                if len(encoded) <= max_chars or not preview:
+                    break
+                preview = preview[:max(0, len(preview) - max(32, len(encoded) - max_chars))]
+            res.text = encoded if len(encoded) <= max_chars else "{}"
+        else:
+            res.text = clip(res.text, max_chars)
         return res
 
 

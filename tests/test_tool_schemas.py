@@ -13,7 +13,7 @@ def test_tools_are_valid_ollama_format():
 
 
 def test_expected_tools_present():
-    assert TOOL_NAMES == {"open_url", "search", "play_youtube", "search_open",
+    assert TOOL_NAMES == {"browser_snapshot", "open_url", "search", "play_youtube", "search_open",
                           "navigate", "read_page", "click", "type_text",
                           "press_enter", "scroll", "list_tabs", "close_tab"}
 

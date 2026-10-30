@@ -9,6 +9,14 @@ from pathlib import Path
 from typing import Optional
 
 _G: dict[str, re.Pattern] = {
+    "git": re.compile(r"\b(git|github|repository|repo|branch|commit|pull request|issue|diff)\b", re.I),
+    "testing": re.compile(r"\b(pytest|unittest|tests?|testlauf|prüfe|prüfen|verifiziere|checksum|sha256)\b", re.I),
+    "ssh": re.compile(r"\b(ssh|raspberry|pi|pinet|remote.host|ferndiagnose)\b", re.I),
+    "analysis": re.compile(r"\b(csv|tsv|xlsx|excel|pandas|datenanalyse|fehlwerte|statistik|diagramm\w*|plot\w*)\b", re.I),
+    "documents_create": re.compile(r"\b(pdf|word|docx|xlsx|bericht|report|dokument)\b", re.I),
+    "workflows": re.compile(r"\b(workflow\w*|arbeitsablauf|arbeitsabläufe|ablauf|abläufe|rezept\w*)\b", re.I),
+    "mcp": re.compile(r"\bmcp\b", re.I),
+    "mac_ui": re.compile(r"\b(fenster|menü|tastenkombination|tastenkürzel|bedienungshilfen|finder|systemeinstellungen|mac.app)\b", re.I),
     "files": re.compile(r"\b(datei|dateien|ordner|verzeichnis|pfad|readme|dokumentenordner|"
                         r"lies|lese|schreib\w*|anleg\w*|erstell\w*|kopier\w*|verschieb\w*|umbenenn\w*|"
                         r"lösch\w*|entfern\w*|bearbeit\w*|ändere|speicher\w*)\b|\.(md|txt|py|json|csv|yaml|js|html)\b", re.I),

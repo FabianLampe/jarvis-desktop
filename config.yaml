@@ -145,6 +145,17 @@ research:
   max_sources: 4
   max_chars_per_source: 3000
 
+# Neue Adapter: bewusst keine unbekannten Hosts/Server automatisch verbinden.
+extensions:
+  ssh:
+    enabled: false
+    hosts: {}                # z. B. pi: {hostname: "raspberrypi.local", user: "DEIN_BENUTZER", port: 22}
+  mcp:
+    enabled: false
+    servers: {}              # Alias: {command: "/absoluter/pfad/zum/server", args: [], env_names: []}
+  mac_ui:
+    enabled: false           # benötigt Bedienungshilfen-Zugriff des startenden Terminals / Jarvis
+
 # Integrationen — jede einzeln aktivierbar. Zugangsdaten stehen in .env (nie hier).
 integrations:
   google_calendar: { enabled: false }   # .secrets/credentials.json + Login, siehe README

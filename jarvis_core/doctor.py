@@ -49,6 +49,10 @@ def main() -> int:
     print(f"  chrome       {'gefunden' if chrome else 'nicht gefunden (Browser-Steuerung)'}")
     print(f"  Empfehlung   {suggest_profile(info['ram_gb'], pf.name == 'macos' and info['arch'] == 'arm64')}")
     print(f"\nProfil: {cfg.profile.name}")
+    from .tools.extension_utils import status_lines
+    print("\nWerkzeug-Erweiterungen (lokaler Einrichtungsstatus):")
+    for line in status_lines(cfg):
+        print("  " + line)
     have = installed_models(cfg.ollama_host)
     if have is None:
         print(f"  ✗ Ollama unter {cfg.ollama_host} nicht erreichbar (App starten / `ollama serve`)"); problems += 1

@@ -133,7 +133,8 @@ class BrowserAgent:
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": SYSTEM_PROMPT +
              "\nDu kannst den Browser über die bereitgestellten Werkzeuge steuern. "
-             "Nutze sie für Web-Aufgaben und antworte sonst normal."},
+             "Nutze sie für Web-Aufgaben und antworte sonst normal. "
+             "Vor click/type_text browser_snapshot abrufen; uids niemals raten und nach Navigation erneuern."},
             {"role": "user", "content": text},
         ]
         for _ in range(max(1, self.cfg.browser.max_steps)):

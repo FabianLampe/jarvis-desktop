@@ -6,6 +6,7 @@ A local personal assistant for macOS (Apple Silicon) and Windows. An animated or
 
 - Chat panel with model routing: a small model for quick answers and a larger one for heavy requests (see [ADR 0001](docs/adr/0001-local-model-strategy.md) and [ADR 0002](docs/adr/0002-heavy-lane-local-7b-no-cloud.md))
 - Automatic local reasoning for analysis, planning, comparisons, coding and multi-step tasks; tool failures can escalate to the reasoning model (see [ADR 0005](docs/adr/0005-automatic-reasoning.md)). Thinking is kept separate from the spoken answer.
+- [Tool extensions](docs/werkzeug-erweiterungen.md): browser element snapshots, Git/GitHub, structured pytest/file checks, configured SSH/Pi diagnostics, CSV/Excel analysis, charts, PDF/Word/Excel output, Mac Accessibility, saved workflows and general stdio MCP servers. Optional packages: `pip install -r requirements-tools.txt`.
 - Voice interface: wake word (openWakeWord), German speech-to-text (faster-whisper), text-to-speech (edge-tts), barge-in and follow-up conversation
 - Browser control through the `chrome-devtools-mcp` server, using a separate Chrome profile
 - Daily briefing: open GitHub issues, unread Gmail (read-only), weather and system status
@@ -148,7 +149,7 @@ Only enable what a feature needs. macOS asks on first use; grant it to the app t
 | Microphone | voice daemon (wake word, push-to-talk) | Privacy & Security → Microphone |
 | Screen & System Audio Recording | `screen_ocr` only | Privacy & Security → Screen & System Audio Recording |
 | Notifications | reminder banners (`osascript` notifications) | System Settings → Notifications |
-| Accessibility | **not used** (no UI scripting) | – |
+| Accessibility | optional `mac_ui_snapshot` / `mac_ui_action` (`extensions.mac_ui.enabled`) | Privacy & Security → Accessibility |
 | Automation | **not used** unless you add AppleScript control of other apps | – |
 
 Admin commands (`sudo …`) are shown for confirmation and then run through the native macOS administrator dialog.

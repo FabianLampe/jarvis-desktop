@@ -13,6 +13,7 @@ def _fn(name, desc, properties, required):
 
 
 TOOLS = [
+    _fn("browser_snapshot", "Zeigt Browser-Elemente mit uid vor click/type_text; nach Navigation neu abrufen.", {}, []),
     _fn("open_url", "Öffnet eine Webadresse in einem neuen Tab.",
         {"url": {"type": "string", "description": "Vollständige URL inkl. https://"}}, ["url"]),
     _fn("search", "Sucht im Web (Google oder YouTube).",
