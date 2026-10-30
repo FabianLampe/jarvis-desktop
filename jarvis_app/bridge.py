@@ -399,6 +399,9 @@ class Bridge:
             self._tasks.cancel()
         if self._rt is not None:
             self._rt.agent.cancel()
+        cancel_chat = getattr(self._chat, "cancel", None)
+        if cancel_chat:
+            cancel_chat()
         self._hub.stop_speaking()
         return {"ok": True}
 
@@ -522,10 +525,13 @@ class Bridge:
                         self._js("jarvis.onState", ev["value"], None)
                 elif kind == "route":
                     self._last_model = ev["model"]
-                    self._heavy_active = ev["lane"] == "heavy"
+                    self._heavy_active = ev["lane"] in ("heavy", "reasoning")
                     if not voice_origin:
                         self._js("jarvis.onMeta", sid, ev)
                     self._push_status()
+                elif kind == "reasoning":
+                    if not voice_origin:
+                        self._js("jarvis.onMeta", sid, ev)
                 else:  # swap / done / error
                     if not voice_origin:
                         flush(force=True)
@@ -643,7 +649,12 @@ class Bridge:
         try:
             for ev in task.agent.run(text, history=list(self._chat.history[-6:])):
                 kind = ev.get("type")
-                if kind == "action":
+                if kind == "reasoning":
+                    if ev.get("active"):
+                        tm.update(task, current="denkt nach und prüft den Auftrag", status="running")
+                        if not voice_origin:
+                            self._js("jarvis.onMeta", sid, ev)
+                elif kind == "action":
                     tm.update(task, current=_re.sub(r",?\s*Sir\.?$", "", ev["text"]), status="running")
                     pre = f"Aufgabe {task.id}: " if len(tm.active()) > 1 else ""   # Präfix, sobald parallel
                     if voice_origin:

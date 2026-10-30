@@ -24,6 +24,12 @@ ollama:
   host: "http://127.0.0.1:11434"
   keep_alive: "30m"        # Residenz der 3B-Spezialisten (ADR 0001)
 
+# Automatisches Reasoning; benötigt profiles.<profil>.reasoning.
+reasoning:
+  mode: "auto"           # auto = nach Aufgabe / Werkzeugfehler; on = immer; off = keine automatische Eskalation
+  max_tokens: 2048        # Thinking + Antwort je Aufruf (kein reines Denkbudget)
+  timeout_s: 120          # Generierungsbudget; Befehle haben ihre separaten Werkzeug-Zeitlimits
+
 voice_ws:                  # Schnittstelle App ↔ Sprach-Daemon
   host: "127.0.0.1"
   port: 8765
@@ -108,7 +114,8 @@ profiles:
     coder: "qwen2.5:14b"
     agent: "qwen2.5:14b"    # Modell mit zuverlässigem Tool-Calling
     quick: "qwen2.5:7b"     # Schnellspur: beantwortet Zwischenfragen, solange eine Aufgabe das große Modell belegt
-    heavy: "qwen3.6:35b"    # Schwerlast-Spur: größeres Modell (22 GB) nur auf Ansage
+    heavy: "qwen3.6:35b"    # manuell wählbare Schwerlast; dasselbe Modell dient auch als automatischer Reasoner
+    reasoning: "qwen3.6:35b" # automatisch bei komplexen Aufgaben, sonst bleiben die schnellen Modelle aktiv
     gpu_monitor: false      # kein nvidia-smi; RAM-Anzeige deckt Unified Memory ab
     num_ctx: 8192
 

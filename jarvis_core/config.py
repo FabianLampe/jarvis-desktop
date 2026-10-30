@@ -72,6 +72,7 @@ class Profile:
     num_ctx: int = 2048
     agent: Optional[str] = None   # Modell für Werkzeugaufrufe; None ⇒ general
     quick: Optional[str] = None   # kleines Modell für Chatfragen, WÄHREND Aufgaben laufen (wartet nicht am großen)
+    reasoning: Optional[str] = None  # explizit gewähltes Thinking-Modell; None ⇒ bisheriges Routing
 
     @property
     def agent_model(self) -> str:
@@ -134,6 +135,22 @@ class ResearchConfig:
 
 
 @dataclass(frozen=True)
+class ReasoningConfig:
+    mode: str = "auto"          # auto | on | off (in YAML in Anführungszeichen)
+    max_tokens: int = 2048      # Denken UND Antwort zusammen, je Modellaufruf
+    timeout_s: float = 120.0    # Generierungsbudget je Chat / über alle Tool-Modellaufrufe
+
+    def __post_init__(self):
+        import math
+        if self.mode not in ("auto", "on", "off"):
+            raise ConfigError("reasoning.mode muss auto|on|off sein")
+        if not 128 <= self.max_tokens <= 32768:
+            raise ConfigError("reasoning.max_tokens muss zwischen 128 und 32768 liegen")
+        if not math.isfinite(self.timeout_s) or not 1 <= self.timeout_s <= 600:
+            raise ConfigError("reasoning.timeout_s muss zwischen 1 und 600 liegen")
+
+
+@dataclass(frozen=True)
 class AppConfig:
     profile: Profile
     orb: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_ORB))
@@ -150,6 +167,7 @@ class AppConfig:
     ws_host: str = "127.0.0.1"
     ws_port: int = 8765
     window_bg: str = "dark"  # dark | transparent
+    reasoning: ReasoningConfig = field(default_factory=ReasoningConfig)
 
 
 class ConfigError(ValueError):
@@ -288,6 +306,12 @@ def load(path: str | Path | None = None,
         max_sources=int(rs.get("max_sources", 4)),
         max_chars_per_source=int(rs.get("max_chars_per_source", 3000)))
     integrations = {str(n): dict(v or {}) for n, v in (raw.get("integrations") or {}).items()}
+    rr = raw.get("reasoning") or {}
+    mode = rr.get("mode", "auto")
+    # YAML 1.1 liest unquoted on/off als bool; beide Schreibweisen zulassen.
+    mode = ("on" if mode else "off") if isinstance(mode, bool) else str(mode).lower()
+    reasoning = ReasoningConfig(mode=mode, max_tokens=int(rr.get("max_tokens", 2048)),
+                                timeout_s=float(rr.get("timeout_s", 120)))
 
     return AppConfig(
         profile=Profile(
@@ -299,9 +323,11 @@ def load(path: str | Path | None = None,
             num_ctx=int(p.get("num_ctx", 2048)),
             agent=p.get("agent"),
             quick=p.get("quick"),
+            reasoning=p.get("reasoning"),
         ),
         tools=tools, knowledge=knowledge, reminders=reminders, research=research,
         integrations=integrations,
+        reasoning=reasoning,
         orb=orb,
         voice=voice,
         browser=browser,

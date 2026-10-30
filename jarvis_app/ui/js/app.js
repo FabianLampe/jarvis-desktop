@@ -302,11 +302,25 @@
         case 'route':
           startStream(sid);
           break;
+        case 'reasoning':
+          if (ev.active) {
+            var rs = streams[sid] || startStream(sid);
+            if (!rs.reasoningLine) {
+              rs.reasoningLine = document.createElement('div');
+              rs.reasoningLine.className = 'act';
+              rs.reasoningLine.textContent = 'Jarvis denkt nach …';
+              rs.el.insertBefore(rs.reasoningLine, rs.el.querySelector('.text'));
+              scrollLog();
+            }
+          }
+          break;
         case 'done':
+          if (streams[sid] && streams[sid].reasoningLine) streams[sid].reasoningLine.remove();
           finishStream(sid);
           break;
         case 'error':
           var s = streams[sid];
+          if (s && s.reasoningLine) s.reasoningLine.remove();
           if (s && s.gotToken) {
             var err = document.createElement('div');
             err.className = 'err';

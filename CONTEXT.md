@@ -152,6 +152,12 @@ Blind-Modellvergleich · persistenter Memory/Skills-Store · 2FA · PWA-Mobile.
 
 ## Status
 
+**Update 2026-10-30:** [ADR 0005](docs/adr/0005-automatic-reasoning.md) erweitert die frühere
+„Schwerlast nur auf Ansage“-Regel für Profile mit `reasoning:`. Im Mac-Profil darf Jarvis
+`qwen3.6:35b` nun automatisch für komplexe Aufgaben / nach Werkzeugfehlern wählen.
+`reasoning.mode: auto|on|off` steuert dies; Home/Dev bleiben bei ihrer bisherigen Modellauswahl.
+Ollama-Thinking, begrenzte Generierung und interner Thinking-Kontext in Tool-Aufträgen sind angebunden.
+
 **Alle Grundsatzfragen geklärt** (Modell-Strategie, Schwerlast-Spur, Fork/nativ, Sprache,
 Router-Steuerung, Feature-Umfang, Persona, GUI). Architektur in ADR 0001–0003 + obigen Entscheidungen.
 

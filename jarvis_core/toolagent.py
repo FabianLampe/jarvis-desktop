@@ -21,7 +21,9 @@ from typing import Any, Callable, Iterator, Optional
 from zoneinfo import ZoneInfo
 
 from .config import AppConfig
-from .ollama_client import ModelMissing, OllamaClient, OllamaUnavailable
+from .ollama_client import ModelMissing, OllamaClient, OllamaUnavailable, OllamaError
+from .reasoning import fit_tool_context, generation_options
+from .router import wants_reasoning
 from .tool_intent import fast_path, select_groups
 from .tools.registry import (ALLOW, CONFIRM, DENY, ConfirmationManager, ToolContext, ToolRegistry,
                              ToolResult, clip)
@@ -41,6 +43,10 @@ Du erledigst Aufgaben mit Werkzeugen. Regeln:
 4. Löschen, Administratorbefehle und Änderungen außerhalb des Arbeitsordners bestätigt das System selbst beim Nutzer; frage nicht extra nach.
 5. Behaupte nie, etwas getan zu haben, wenn du kein Werkzeug aufgerufen hast.
 6. Nenne bei Recherche und Dokumenten die Quelle kurz im Satz (Seite bzw. Webseite), ohne Quellenliste anzuhängen.
+7. Prüfe vor dem Abschluss alle Teilziele des Nutzerauftrags gegen die Werkzeugergebnisse.
+   Nutze bei Bedarf ein lesendes Werkzeug zum Prüfen (z. B. Datei erneut lesen / Test ausführen).
+   Korrigiere Fehler innerhalb des Budgets. Wiederhole nie blind dieselbe fehlgeschlagene Aktion.
+   Beschreibe offene Teilziele ausdrücklich; erfolgreiche Einzelwerkzeuge beweisen nicht das Gesamtziel.
 Arbeitsordner: {workspace}. Relative Pfade gelten dort. Jetzt: {now} (Europe/Berlin).
 {facts}"""
 
@@ -147,28 +153,70 @@ class ToolAgent:
         messages = [{"role": "system", "content": self._system(text)},
                     *history[-6:], {"role": "user", "content": text}]
         model = self.cfg.profile.agent_model
+        reasoning = bool(self.cfg.profile.reasoning and wants_reasoning(text, self.cfg.reasoning))
+        if reasoning:
+            model = self.cfg.profile.reasoning
+        yield {"type": "reasoning", "active": reasoning, "model": model}
+        generation_left = self.cfg.reasoning.timeout_s
+        limit = max(1, self.cfg.tools.max_steps)
+        seen: dict[str, int] = {}
         self._final = ""
-        for step in range(max(1, self.cfg.tools.max_steps)):
+        # Ein zusätzlicher Aufruf darf nach dem letzten Werkzeug nur noch zusammenfassen.
+        for _ in range(limit + 1):
             if self.ctx.cancel.is_set():
                 return
+            can_act = len(outcomes) < limit
+            if not can_act:
+                messages.append({"role": "user", "content":
+                                 "Das Werkzeugbudget ist verbraucht. Prüfe anhand der vorhandenen Ergebnisse, "
+                                 "welche Teilziele erreicht und welche offen sind. Keine weiteren Aufrufe."})
+            options = generation_options(self.client, self.cfg, model, reasoning)
+            if options:
+                if generation_left <= 0:
+                    outcomes.append({"tool": "llm", "ok": False, "text": "Zeitlimit der Modellgenerierung erreicht"})
+                    return
+                options["max_time_s"] = generation_left
+                options["cancel"] = self.ctx.cancel
+                if not fit_tool_context(messages, specs if can_act else [], self.cfg.profile.num_ctx,
+                                        options["num_predict"]):
+                    outcomes.append({"tool": "llm", "ok": False,
+                                     "text": "Kontextlimit erreicht; Auftrag aufteilen oder neuen Chat starten"})
+                    return
+            started = time.monotonic()
             try:
-                msg = self.client.chat_once(model, messages, tools=specs, num_ctx=self.cfg.profile.num_ctx,
-                                            keep_alive=self.cfg.keep_alive)
+                msg = self.client.chat_once(model, messages, tools=specs if can_act else None,
+                                            num_ctx=self.cfg.profile.num_ctx,
+                                            keep_alive=self.cfg.keep_alive, **options)
             except OllamaUnavailable:
                 outcomes.append({"tool": "llm", "ok": False, "text": "Das Sprachmodell ist nicht erreichbar"})
                 return
             except ModelMissing as exc:
                 outcomes.append({"tool": "llm", "ok": False, "text": f"Modell fehlt: ollama pull {exc.model}"})
                 return
+            except OllamaError as exc:
+                outcomes.append({"tool": "llm", "ok": False, "text": str(exc)})
+                return
+            generation_left -= time.monotonic() - started
+            if self.ctx.cancel.is_set():
+                return
             calls = msg.get("tool_calls") or []
             if not calls:
-                calls, text = _text_tool_calls(msg.get("content") or "", allowed)
+                calls, answer = _text_tool_calls(msg.get("content") or "", allowed)
                 if not calls:
-                    self._final = text.strip()
+                    self._final = answer.strip()
+                    if not self._final:
+                        outcomes.append({"tool": "llm", "ok": False,
+                                         "text": "Das Modell hat keine vollständige Antwort geliefert"})
                     return
                 msg = {**msg, "content": "", "tool_calls": calls}
-            messages.append({"role": "assistant", "content": msg.get("content", ""), "tool_calls": calls})
+            # Thinking bleibt im laufenden Tool-Dialog erhalten, niemals in der Sprachausgabe.
+            messages.append({"role": "assistant", "content": msg.get("content", ""), "tool_calls": calls,
+                             **({"thinking": msg["thinking"]} if msg.get("thinking") else {})})
             for call in calls:
+                if len(outcomes) >= limit:
+                    outcomes.append({"tool": "llm", "ok": False,
+                                     "text": "Schrittlimit erreicht; der Auftrag ist möglicherweise unvollständig"})
+                    return
                 fn = call["function"]["name"]
                 raw = call["function"].get("arguments", {})
                 try:
@@ -179,13 +227,24 @@ class ToolAgent:
                     outcomes.append({"tool": fn, "ok": False, "text": f"Werkzeug {fn} ist hier nicht verfügbar"})
                     messages.append({"role": "tool", "name": fn, "content": f"FEHLER: {fn} nicht verfügbar"})
                     continue
+                key = f"{fn}:{json.dumps(args, sort_keys=True, ensure_ascii=False)}"
+                seen[key] = seen.get(key, 0) + 1
+                if seen[key] > 2:
+                    outcomes.append({"tool": fn, "ok": False, "final": True,
+                                     "text": "Wiederholungslimit erreicht; identische Aktion nicht erneut ausgeführt"})
+                    return
                 n0 = len(outcomes)
                 yield from self._step(fn, args, outcomes, sources)
                 o = outcomes[-1] if len(outcomes) > n0 else {"ok": False, "text": "Abgebrochen"}
                 messages.append({"role": "tool", "name": fn,
+                                 "tool_name": fn,
                                  "content": ("OK: " if o["ok"] else "FEHLER: ") + o["text"]})
                 if o.get("declined"):
                     return                         # Nutzer hat abgelehnt: nichts weiter versuchen
+                if not o["ok"] and self.cfg.profile.reasoning and wants_reasoning(
+                        text, self.cfg.reasoning, failed=True) and not reasoning:
+                    reasoning, model = True, self.cfg.profile.reasoning
+                    yield {"type": "reasoning", "active": True, "model": model}
         self._final = self._final or ""
 
     # -------------------------------------------------------- Abschluss

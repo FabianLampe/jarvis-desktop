@@ -15,11 +15,13 @@ Ereignisse:
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Iterator
 
 from .config import AppConfig
-from .ollama_client import ModelMissing, OllamaClient, OllamaUnavailable
+from .ollama_client import ModelMissing, OllamaClient, OllamaUnavailable, OllamaError
 from .persona import messages_with_persona
+from .reasoning import generation_options
 from .router import route
 
 log = logging.getLogger("jarvis.chat")
@@ -39,6 +41,10 @@ class ChatService:
         self.client = client or OllamaClient(cfg.ollama_host)
         self.history: list[dict[str, str]] = []
         self.facts = facts          # Callable[[str], list[str]] | None — Gedächtnis-Fakten
+        self._cancel = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel.set()
 
     # ------------------------------------------------------------------ Chat
 
@@ -46,9 +52,10 @@ class ChatService:
              model_override: str | None = None) -> Iterator[dict[str, Any]]:
         """model_override: Schnellspur — kleineres Modell, solange Aufgaben das große belegen."""
         from dataclasses import replace
+        cancel = self._cancel = threading.Event()
         profile = self.cfg.profile
-        decision = route(text, force_7b, profile)
-        if model_override and decision.lane != "heavy":
+        decision = route(text, force_7b, profile, self.cfg.reasoning)
+        if model_override and decision.lane not in ("heavy", "reasoning"):
             decision = replace(decision, model=model_override, reason="Schnellspur (Aufgabe läuft)")
         yield {
             "type": "route",
@@ -57,6 +64,8 @@ class ChatService:
             "reason": decision.reason,
             "heavy_requested": decision.heavy_requested,
             "heavy_unavailable": decision.heavy_unavailable,
+            "reasoning": decision.reasoning or (
+                decision.lane == "heavy" and self.cfg.reasoning.mode != "off"),
         }
         yield {"type": "state", "value": "think"}
 
@@ -69,7 +78,8 @@ class ChatService:
             except Exception:  # noqa: BLE001 — Gedächtnis darf den Chat nie blockieren
                 log.debug("Fakten nicht lesbar", exc_info=True)
         messages = messages_with_persona(self.history, facts)
-        heavy = decision.lane == "heavy"
+        heavy = decision.lane in ("heavy", "reasoning") and decision.model not in (
+            profile.general, profile.coder)
 
         if heavy:
             # ADR 0002: 3B-Paar entladen → 7B laden → antworten → 3B zurückladen
@@ -80,11 +90,22 @@ class ChatService:
 
         parts: list[str] = []
         tps = None
+        thinking_notified = False
+        options = generation_options(self.client, self.cfg, decision.model,
+                                     decision.reasoning or (
+                                         decision.lane == "heavy" and self.cfg.reasoning.mode != "off"))
+        if options:
+            options["cancel"] = cancel
         try:
             for ev in self.client.chat_stream(
                 decision.model, messages,
                 num_ctx=profile.num_ctx, keep_alive=0 if heavy else self.cfg.keep_alive,
+                **options,
             ):
+                if ev.get("thinking") and not thinking_notified:
+                    # Nur ein Statussignal, der eigentliche Denktext bleibt im Backend.
+                    yield {"type": "reasoning", "active": True}
+                    thinking_notified = True
                 if token := ev.get("token"):
                     if not parts:
                         yield {"type": "state", "value": "speak"}
@@ -106,6 +127,13 @@ class ChatService:
             self.history.pop()
             yield {"type": "error",
                    "message": MSG_MODEL_MISSING.format(model=exc.model), "fatal": True}
+            yield {"type": "state", "value": "idle"}
+            return
+        except OllamaError as exc:
+            # Teilantwort sichtbar lassen, aber nicht als fertige Antwort speichern.
+            if self.history and self.history[-1].get("role") == "user":
+                self.history.pop()
+            yield {"type": "error", "message": str(exc), "fatal": not bool(parts)}
             yield {"type": "state", "value": "idle"}
             return
         finally:
@@ -158,6 +186,7 @@ class ChatService:
             self.history.append({"role": "assistant", "content": assistant})
 
     def reset(self) -> None:
+        self.cancel()
         self.history.clear()
         if hasattr(self.client, "last_usage"):
             self.client.last_usage = None

@@ -5,6 +5,7 @@ A local personal assistant for macOS (Apple Silicon) and Windows. An animated or
 ## Features
 
 - Chat panel with model routing: a small model for quick answers and a larger one for heavy requests (see [ADR 0001](docs/adr/0001-local-model-strategy.md) and [ADR 0002](docs/adr/0002-heavy-lane-local-7b-no-cloud.md))
+- Automatic local reasoning for analysis, planning, comparisons, coding and multi-step tasks; tool failures can escalate to the reasoning model (see [ADR 0005](docs/adr/0005-automatic-reasoning.md)). Thinking is kept separate from the spoken answer.
 - Voice interface: wake word (openWakeWord), German speech-to-text (faster-whisper), text-to-speech (edge-tts), barge-in and follow-up conversation
 - Browser control through the `chrome-devtools-mcp` server, using a separate Chrome profile
 - Daily briefing: open GitHub issues, unread Gmail (read-only), weather and system status
@@ -96,6 +97,47 @@ Triggered by double clap, the voice command "Briefing", or the button in the pan
 Only one app and one daemon can run: a second start exits with a message (lock files in the data folder).
 Jarvis ignores its own voice coming back through the speakers (echo filter, 0.8 s quiet tail after speaking, queued speech so briefing lines are not heard between each other). The double-clap trigger is off by default (`clap_enabled`).
 Logs: `~/Library/Application Support/Jarvis/logs/{app,daemon}.log`.
+
+### Automatic reasoning
+
+The `mac` profile uses `qwen3.6:35b` automatically for complex chat/tool requests. Install it once if missing:
+
+```sh
+ollama pull qwen3.6:35b
+./start_jarvis_mac.sh --check
+```
+
+Restart Jarvis after changing the configuration. No special wording or Schwerlast toggle is needed: try
+“Analysiere, warum mein Python-Skript langsam wird” or “Erstelle einen Projektordner, schreibe eine README und prüfe den Inhalt”.
+Short chat stays on the fast model; existing direct commands (apps, weather, exact maths, saving a fact) still bypass the LLM.
+
+```yaml
+reasoning:
+  mode: "auto"       # auto | on | off
+  max_tokens: 2048    # thinking + final answer together, per generation
+  timeout_s: 120     # generation time budget (shared across a tool task's model calls)
+```
+
+`on` selects the reasoning model for every LLM-based chat/tool request; `off` disables automatic escalation.
+The manual Schwerlast selection still works. Profiles without `reasoning:` keep their previous model routing;
+`home` and `dev` do not automatically load the Mac's large model. To choose another local model, set
+`profiles.<profile>.reasoning` to its Ollama name and install it yourself. The checker includes that model.
+
+Jarvis discovers supported `think` controls through `/api/show`, including boolean controls and named levels
+(prefers `medium`). Unsupported settings are omitted. Older servers without metadata use the model default;
+models that always think cannot necessarily disable thinking. Missing models produce the `ollama pull` instruction,
+rather than silently substituting another model. The panel shows “Jarvis denkt nach …”; reasoning text is never
+sent to speech or saved as the final chat answer. In tool tasks it is retained in the active model dialog and
+discarded first if context space runs short; tool results are not silently removed.
+
+Token exhaustion, context exhaustion and repeated identical tool calls are reported explicitly. `tools.max_steps`
+counts individual tool attempts, including several calls in one model reply, with one final model call allowed
+only for a summary. The prompt asks the model to verify each subgoal against actual tool results; this is not
+a formal proof of goal completion. Existing action confirmations and untrusted-content rules still apply.
+Generation time is checked as stream chunks arrive and also caps HTTP read timeouts; cancellation closes the
+stream at the next chunk/read failure. Model loading or a silent server may delay that feedback. Tool runtimes
+and time spent waiting for confirmation have their own limits. More reasoning costs time and is not a guarantee
+of correctness. The integration is tested against a local HTTP stand-in, not a real Ollama/Mac installation.
 
 ## macOS permissions
 
