@@ -33,7 +33,8 @@ def spawn_agent(rt: "Runtime", interactive: bool = True) -> ToolAgent:
     """Neuer, unabhängiger Agent (eigener Kontext, eigener Abbruch, eigene Prozesse) für eine parallele
     Aufgabe. Browser, Wissensbasis, Gedächtnis, Erinnerungen werden mit den anderen Aufgaben geteilt."""
     ctx = ToolContext(rt.cfg, workspace=rt.ctx.workspace, data_dir=rt.ctx.data_dir, shared=rt.ctx.services)
-    return ToolAgent(rt.cfg, rt.agent.client, rt.registry, ctx, rt.confirms, interactive=interactive, facts=rt.facts)
+    return ToolAgent(rt.cfg, rt.agent.client, rt.registry, ctx, rt.confirms, interactive=interactive,
+                     facts=rt.facts, reusable=False)
 
 
 def build_runtime(cfg: AppConfig, client: Optional[OllamaClient] = None, *, interactive: bool = True,

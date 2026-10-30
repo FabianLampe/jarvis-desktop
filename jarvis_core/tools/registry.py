@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from jsonschema import Draft202012Validator
+
 from ..config import AppConfig
 from ..platform import PlatformAdapter, current as current_platform
 
@@ -59,7 +61,7 @@ class Tool:
         return {"type": "function", "function": {
             "name": self.name, "description": self.description,
             "parameters": {"type": "object", "properties": self.props,
-                           "required": list(self.required)}}}
+                           "required": list(self.required), "additionalProperties": False}}}
 
 
 # ---------------------------------------------------------------- Kontext
@@ -169,10 +171,23 @@ class ConfirmationManager:
 class ToolRegistry:
     def __init__(self):
         self._tools: dict[str, Tool] = {}
+        self._validators = {}
 
     def register(self, *tools: Tool) -> None:
         for t in tools:
             self._tools[t.name] = t
+            self._validators[t.name] = Draft202012Validator(t.spec()["function"]["parameters"])
+
+    def argument_error(self, name: str, args: dict) -> str | None:
+        if name not in self._tools:
+            return f"Unbekanntes Werkzeug: {name}"
+        if not isinstance(args, dict):
+            return "Werkzeugargumente müssen ein JSON-Objekt sein"
+        error = next(self._validators[name].iter_errors(args), None)
+        if error is not None:
+            field = ".".join(map(str, error.absolute_path)) or "Argumente"
+            return f"Ungültige Angabe ({field}): {error.message}"
+        return None
 
     def get(self, name: str) -> Optional[Tool]:
         return self._tools.get(name)
@@ -187,19 +202,26 @@ class ToolRegistry:
         return [t.spec() for t in self._tools.values() if groups is None or t.group in groups]
 
     def assess(self, ctx: ToolContext, name: str, args: dict) -> Assessment:
+        if error := self.argument_error(name, args):
+            return Assessment(DENY, error)
         tool = self._tools[name]
         if tool.assess is None:
             return Assessment(ALLOW)
-        return tool.assess(ctx, args)
+        try:
+            return tool.assess(ctx, args)
+        except ToolError as exc:
+            return Assessment(DENY, str(exc))
+        except Exception:
+            log.exception("Berechtigungsprüfung für %s fehlgeschlagen", name)
+            return Assessment(DENY, "Berechtigungsprüfung fehlgeschlagen; nicht ausgeführt")
 
     def execute(self, ctx: ToolContext, name: str, args: dict, max_chars: int) -> ToolResult:
         """Führt ohne erneute Richtlinienprüfung aus (Aufrufer hat assess/confirm erledigt)."""
         tool = self._tools.get(name)
         if tool is None:
             return ToolResult(False, f"Unbekanntes Werkzeug: {name}")
-        missing = [r for r in tool.required if r not in args or args[r] in (None, "")]
-        if missing:
-            return ToolResult(False, f"Fehlende Angabe: {', '.join(missing)}")
+        if error := self.argument_error(name, args):
+            return ToolResult(False, error)
         try:
             res = tool.handler(ctx, args)
         except ToolError as exc:

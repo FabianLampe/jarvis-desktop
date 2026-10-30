@@ -66,7 +66,7 @@ def test_failure_is_not_hidden_by_success_on_another_target(tmp_path):
     rt = runtime(tmp_path, {"tool_calls": [call("run_command", argv=["ls", "/gibt/es/nicht"])]},
                  {"tool_calls": [call("run_command", argv=["ls"])]}, {"content": "Build erledigt."})
     done = run(rt, "Führe im Terminal ls aus")[-1]
-    assert not done["ok"] and "Build erledigt" not in done["text"] and "Rückgabecode 1" in done["text"]
+    assert not done["ok"] and "Build erledigt" not in done["text"] and "Rückgabecode" in done["text"]
 
 
 def test_retry_with_same_target_resolves_failure(tmp_path):

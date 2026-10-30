@@ -49,7 +49,7 @@ class FillerSource:
         if self._weather is None:
             return None
         ts, text = self._weather_cache
-        if time.monotonic() - ts > 1800:            # höchstens alle 30 min abfragen
+        if ts == 0 or time.monotonic() - ts > 1800: # auch kurz nach Systemstart einmal abfragen
             try:
                 text = self._weather()
             except Exception:  # noqa: BLE001 — Füller ist Kür
@@ -61,7 +61,7 @@ class FillerSource:
         with self._lock:
             self._n += 1
             lead = LEADS[(self._n - 1) % len(LEADS)]
-            wants_weather = self._n == 2 and "wetter" not in request.lower()
+            wants_weather = self._n % 2 == 0 and "wetter" not in request.lower()
             if wants_weather and (w := self._weather_line()):
                 return f"Kleine Zwischeninfo zum Wetter, Sir: {w}"
             if not self._facts:

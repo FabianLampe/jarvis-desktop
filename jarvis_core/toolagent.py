@@ -58,11 +58,12 @@ Arbeitsordner: {workspace}. Relative Pfade gelten dort. Jetzt: {now} (Europe/Ber
 class ToolAgent:
     def __init__(self, cfg: AppConfig, client: Optional[OllamaClient], registry: ToolRegistry,
                  ctx: ToolContext, confirms: ConfirmationManager, interactive: bool = True,
-                 facts: Optional[Callable[[str], list[str]]] = None):
+                 facts: Optional[Callable[[str], list[str]]] = None, reusable: bool = True):
         self.cfg, self.client, self.reg, self.ctx = cfg, client, registry, ctx
         self.confirms = confirms
         self.interactive = interactive
         self.facts = facts
+        self.reusable = reusable
         self._lock = threading.Lock()
         self._pending_ids: set[str] = set()
 
@@ -80,7 +81,8 @@ class ToolAgent:
 
     def run(self, text: str, history: Optional[list[dict]] = None) -> Iterator[dict[str, Any]]:
         with self._lock:                        # ein Auftrag zur Zeit (Text und Sprache)
-            self.ctx.cancel.clear()
+            if self.reusable:
+                self.ctx.cancel.clear()
             self.ctx.tainted = False
             outcomes: list[dict] = []
             sources: list[dict] = []
@@ -100,6 +102,16 @@ class ToolAgent:
 
     def _step(self, name: str, args: dict, outcomes: list, sources: list) -> Iterator[dict]:
         """Bewertet, bittet ggf. um Bestätigung, führt aus. Setzt outcomes[-1]."""
+        if self.ctx.cancel.is_set():
+            outcomes.append({"tool": name, "ok": False, "text": "Abgebrochen", "cancelled": True})
+            return
+        tool = self.reg.get(name)
+        if isinstance(args, dict):
+            args = _coerce(args, tool.props if tool else {})
+        if error := self.reg.argument_error(name, args):
+            outcomes.append({"tool": name, "ok": False, "text": error})
+            yield {"type": "result", "tool": name, "ok": False, "text": error}
+            return
         if name == "workflow_run":
             from .tools.workflow_tools import load_workflow
             from .tools.registry import ToolError
@@ -124,7 +136,6 @@ class ToolAgent:
         if tool is None:
             outcomes.append({"tool": name, "ok": False, "text": f"Unbekanntes Werkzeug: {name}"})
             return
-        args = _coerce(args)
         a = self.reg.assess(self.ctx, name, args)
         if a.level == DENY:
             outcomes.append({"tool": name, "ok": False, "text": f"Verweigert: {a.summary}", "final": True})
@@ -138,6 +149,11 @@ class ToolAgent:
                 return
             pa = self.confirms.create(name, args, a.summary)
             self._pending_ids.add(pa.id)
+            if self.ctx.cancel.is_set():
+                self.confirms.cancel_ids([pa.id])
+                self._pending_ids.discard(pa.id)
+                outcomes.append({"tool": name, "ok": False, "text": "Abgebrochen", "cancelled": True})
+                return
             yield {"type": "confirm", "id": pa.id, "summary": a.summary, "tool": name, "args": pa.args}
             approved = self.confirms.wait(pa)
             self._pending_ids.discard(pa.id)
@@ -223,7 +239,15 @@ class ToolAgent:
             generation_left -= time.monotonic() - started
             if self.ctx.cancel.is_set():
                 return
+            if not isinstance(msg, dict) or not isinstance(msg.get("content", ""), (str, type(None))):
+                outcomes.append({"tool": "llm", "ok": False, "text": "Ungültiges Antwortformat vom Modell"})
+                return
             calls = msg.get("tool_calls") or []
+            if not isinstance(calls, list) or any(
+                    not isinstance(c, dict) or not isinstance(c.get("function"), dict)
+                    or not isinstance(c["function"].get("name"), str) for c in calls):
+                outcomes.append({"tool": "llm", "ok": False, "text": "Ungültiges Werkzeugaufruf-Format vom Modell"})
+                return
             if not calls:
                 calls, answer = _text_tool_calls(msg.get("content") or "", allowed)
                 if not calls:
@@ -244,9 +268,12 @@ class ToolAgent:
                 fn = call["function"]["name"]
                 raw = call["function"].get("arguments", {})
                 try:
-                    args = raw if isinstance(raw, dict) else json.loads(raw or "{}")
-                except json.JSONDecodeError:
-                    args = {}
+                    args = raw if isinstance(raw, dict) else json.loads(raw or "{}") if raw is None or isinstance(raw, str) else raw
+                except (json.JSONDecodeError, TypeError):
+                    msg_error = "Werkzeugargumente sind kein gültiges JSON"
+                    outcomes.append({"tool": fn, "ok": False, "text": msg_error})
+                    messages.append({"role": "tool", "tool_name": fn, "name": fn, "content": "FEHLER: " + msg_error})
+                    continue
                 if fn not in allowed:
                     outcomes.append({"tool": fn, "ok": False, "text": f"Werkzeug {fn} ist hier nicht verfügbar"})
                     messages.append({"role": "tool", "name": fn, "content": f"FEHLER: {fn} nicht verfügbar"})
@@ -327,27 +354,35 @@ def _text_tool_calls(content: str, known: set[str]) -> tuple[list[dict], str]:
     """Kleine Modelle liefern Aufrufe manchmal als Text ({"name":…,"arguments":…}, auch in
     <tool_call>-Tags). Gibt (Aufrufe im Ollama-Format, bereinigter Resttext) zurück."""
     calls, rest = [], content or ""
-    candidates = [m.group(1) for m in _TOOL_TAG.finditer(rest)] or [rest]
+    candidates = [m.group(1) for m in _TOOL_TAG.finditer(rest)]
+    if not candidates:
+        candidate = rest.strip()
+        if candidate.endswith("</tool_call>"):
+            candidate = candidate[:-len("</tool_call>")].strip()
+            start = candidate.find("{")
+            prefix = candidate[:start].strip() if start >= 0 else ""
+            if start >= 0 and (not prefix or len(prefix) <= 2 and not prefix.isascii()):
+                candidate = candidate[start:]
+        candidates = [candidate]
     for chunk in candidates:
-        for m in re.finditer(r"\{.*\}", chunk, re.S):
-            try:
-                obj = json.loads(m.group(0))
-            except json.JSONDecodeError:
-                continue
-            if isinstance(obj, dict) and obj.get("name") in known:
-                calls.append({"function": {"name": obj["name"], "arguments": obj.get("arguments") or obj.get("parameters") or {}}})
+        try:
+            obj = json.loads(chunk.strip())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("name"), str) and obj["name"] in known:
+            calls.append({"function": {"name": obj["name"], "arguments": obj.get("arguments", obj.get("parameters", {}))}})
     if calls:
         rest = ""
     else:
-        rest = _TOOL_TAG.sub("", rest).strip()
+        rest = _TOOL_TAG.sub("", rest).replace("</tool_call>", "").strip()
     return calls, rest
 
 
-def _coerce(args: dict) -> dict:
+def _coerce(args: dict, props: dict) -> dict:
     """Kleine Modelle liefern Listen/Objekte gern als JSON-String — tolerant einlesen."""
     out = {}
     for k, v in (args or {}).items():
-        if isinstance(v, str) and v.strip()[:1] in "[{":
+        if props.get(k, {}).get("type") in ("array", "object") and isinstance(v, str) and v.strip()[:1] in "[{":
             try:
                 v = json.loads(v)
             except json.JSONDecodeError:

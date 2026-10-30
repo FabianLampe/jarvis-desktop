@@ -152,6 +152,12 @@ Blind-Modellvergleich · persistenter Memory/Skills-Store · 2FA · PWA-Mobile.
 
 ## Status
 
+**Update 2026-10-30 (Bugprüfung):** JSON-/Textschreiben, Schema-Prüfung, gemischte Aufträge,
+Browser-Routing, Chat-/Task-Abbruch und Neuer-Chat-Rennen, Sprachfüller, GitHub-Antworten und
+Mac-UI-Zeitlimits korrigiert. `pedalboard` als fehlende Sprach-Abhängigkeit ergänzt.
+63 neue Regressionstests; 362 lokal ausführbare Tests bestanden. Einzelheiten:
+[Bugprüfung](docs/bug-review-2026-10-30.md).
+
 **Update 2026-10-30 (Werkzeuge):** 82 registrierte Funktionen, einschließlich Browser-Snapshot,
 Git/GitHub, strukturierten Tests/Dateiprüfungen, SSH/Pi-Diagnose, Datenanalyse/Diagrammen,
 PDF/Word/Excel-Ausgabe, optionaler Mac-AX-Steuerung, gespeicherten Workflows und allgemeinem

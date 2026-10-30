@@ -44,6 +44,8 @@ _SPLIT_RE = re.compile(r"\s+(?:und|dann|danach)\s+", re.IGNORECASE)
 # Füllwörter am Anfang einer Zielangabe („die seite von/vom …")
 _TARGET_PREFIX = re.compile(r"^(?:die\s+|der\s+|das\s+)?(?:seite\s+|webseite\s+|website\s+)?"
                             r"(?:von\s+|vom\s+|der\s+)?", re.IGNORECASE)
+_LOCAL_TARGET = re.compile(r"\b(datei\w*|ordner\w*|verzeichnis\w*|readme|dokument\w*|workflow\w*|fenster|finder)\b|"
+                           r"(?:^|\s)(?:[~/]|[A-Za-z]:[\\/])|\.(?:txt|md|pdf|docx|xlsx|csv|py|json|yaml)\b", re.I)
 
 
 def _clean(text: str) -> str:
@@ -55,6 +57,9 @@ def _clause(text: str) -> Optional[dict]:
     cleaned = _clean(text)
     low = cleaned.lower()
     if not low:
+        return None
+    # Lokale Dateien/Apps dürfen nicht als Seiteninhalt oder Google-Suche enden.
+    if _LOCAL_TARGET.search(cleaned) and not re.search(r"https?://|\b(?:webseite|website|browser)\b", cleaned, re.I):
         return None
 
     if low in _NAV_BACK:
@@ -108,6 +113,8 @@ def _clause(text: str) -> Optional[dict]:
             url = um.group(1)
             return {"tool": "open_url", "args": {"url": url if url.startswith("http") else "https://" + url}}
         # unbekanntes Ziel („die seite vom bundesministerium") → Suche + erstes Ergebnis
+        if not re.search(r"\b(seite|webseite|website)\b", target, re.I):
+            return None  # App-/Dateiziel lieber über den gemeinsamen Werkzeug-Agenten klären
         query = _TARGET_PREFIX.sub("", target).strip()
         if query:
             return {"tool": "search_open", "args": {"query": query, "engine": "google"}}
@@ -131,8 +138,17 @@ def detect_all(text: str) -> list[dict]:
     ergibt eine leere Liste.
     """
     actions: list[dict] = []
-    for part in _SPLIT_RE.split(text):
+    parts = _SPLIT_RE.split(text)
+    for part in parts:
         action = _clause(part)
-        if action is not None:
-            actions.append(action)
+        if action is None:
+            # "Forschung und Entwicklung" ist ein Suchbegriff, keine zweite Aktion.
+            full = _clause(text)
+            another_action = any(re.match(r"^(?:bitte\s+)?(?:öffne|starte|lies|lese|schreib\w*|erstell\w*|"
+                r"speicher\w*|fasse|fass|prüf\w*|analys\w*|recherchier\w*|berechn\w*|merke|"
+                r"klick\w*|scrolle?\w*)\b", p.strip(), re.I) for p in parts[1:])
+            if full and full["tool"] in ("search", "play_youtube") and not another_action:
+                return [full]
+            return []  # gemischten Auftrag vollständig dem ToolAgent überlassen
+        actions.append(action)
     return actions

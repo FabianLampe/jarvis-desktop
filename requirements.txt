@@ -6,6 +6,7 @@ psutil>=7.0
 PyYAML>=6.0
 websockets>=14.0
 requests>=2.32
+jsonschema>=4.20,<5       # Werkzeugargumente vor Policy/Seiteneffekten validieren
 mcp>=1.20                  # MCP-Client für chrome-devtools-mcp (braucht Node/npx + Chrome)
 
 # Tagesbriefing / Google Calendar (OAuth, nur bei aktivierter Integration nötig)

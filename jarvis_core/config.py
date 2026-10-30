@@ -320,6 +320,20 @@ def load(path: str | Path | None = None,
         section = extensions.get(key) or {}
         if not isinstance(section, dict) or not isinstance(section.get("enabled", False), bool):
             raise ConfigError(f"extensions.{key}: Zuordnung mit enabled: true|false erwartet")
+        entries_key = {"ssh": "hosts", "mcp": "servers"}.get(key)
+        if entries_key:
+            entries = section.get(entries_key, {})
+            if (not isinstance(entries, dict) or any(not isinstance(n, str) or not n for n in entries)
+                    or any(not isinstance(v, dict) for v in entries.values())):
+                raise ConfigError(f"extensions.{key}.{entries_key} muss eine Zuordnung von Namen zu Einstellungen sein")
+            if key == "mcp":
+                for server in entries.values():
+                    if (not isinstance(server.get("command", ""), str) or
+                            not isinstance(server.get("args", []), list) or
+                            not all(isinstance(v, str) for v in server.get("args", [])) or
+                            not isinstance(server.get("env_names", []), list) or
+                            not all(isinstance(v, str) for v in server.get("env_names", []))):
+                        raise ConfigError("MCP command muss Text sein, args/env_names müssen Stringlisten sein")
 
     return AppConfig(
         profile=Profile(

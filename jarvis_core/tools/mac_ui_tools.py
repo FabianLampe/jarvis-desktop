@@ -21,14 +21,32 @@ class MacUI:
             raise ToolError("Mac-UI-Pakete fehlen: pip install -r requirements-tools.txt") from None
         if not AX.AXIsProcessTrusted():
             raise ToolError("Bedienungshilfen-Zugriff fehlt: Systemeinstellungen → Datenschutz & Sicherheit → Bedienungshilfen; startendes Terminal/Jarvis freigeben")
+        # Nur das systemweite AX-Objekt setzt den Timeout für alle Elemente dieses Prozesses.
+        AX.AXUIElementSetMessagingTimeout(AX.AXUIElementCreateSystemWide(), 2.0)
         self.ax, self.apps, self.q = AX, AppKit, Quartz
         self.elements, self.app, self.at = {}, None, 0
 
     def attr(self, element, name, default=None):
+        if getattr(self, "cancel", None) is not None and self.cancel.is_set():
+            raise ToolError("Mac-UI-Auftrag abgebrochen")
+        deadline = getattr(self, "_read_deadline", None)
+        if deadline is not None and time.monotonic() >= deadline:
+            raise ToolError("Zeitlimit beim Lesen der Mac-Oberfläche erreicht")
         err, value = self.ax.AXUIElementCopyAttributeValue(element, name, None)
         return default if err else value
 
     def snapshot(self, app_name=None):
+        self._read_deadline = time.monotonic() + 10
+        try:
+            return self._snapshot(app_name)
+        except Exception:
+            self.elements.clear()
+            self.app, self.at = None, 0
+            raise
+        finally:
+            self._read_deadline = None
+
+    def _snapshot(self, app_name=None):
         ws = self.apps.NSWorkspace.sharedWorkspace()
         if app_name:
             matches = [a for a in ws.runningApplications() if str(a.localizedName()).casefold() == app_name.casefold()]
@@ -37,6 +55,8 @@ class MacUI:
             app = matches[0]
         else:
             app = ws.frontmostApplication()
+        if app is None:
+            raise ToolError("Keine aktive Mac-App gefunden")
         self.elements.clear()
         self.app, self.at = app, time.monotonic()
         prefix = secrets.token_hex(4)
@@ -46,7 +66,10 @@ class MacUI:
             element, depth = pending.pop(0)
             eid = f"ax{prefix}:{len(rows) + 1}"
             self.elements[eid] = element
-            role = str(self.attr(element, "AXRole", ""))
+            role = self.attr(element, "AXRole")
+            if not role:
+                raise ToolError("Mac-App antwortet nicht oder Elementbaum ist veraltet; Snapshot erneuern")
+            role = str(role)
             secure = role == "AXSecureTextField" or self.attr(element, "AXSubrole") == "AXSecureTextField"
             value = self.attr(element, "AXValue", "") if not secure else "[geschützt]"
             rows.append({"id": eid, "role": role, "title": str(self.attr(element, "AXTitle", ""))[:150],
@@ -59,6 +82,13 @@ class MacUI:
                 "elements": rows, "truncated": bool(pending), "valid_for_s": 30}
 
     def action(self, a):
+        try:
+            return self._action(a)
+        finally:
+            self.at = 0
+            self.elements.clear()
+
+    def _action(self, a):
         if self.app is None or time.monotonic() - self.at > 30:
             raise ToolError("Zuerst einen frischen mac_ui_snapshot abrufen (IDs gelten 30 Sekunden)")
         action = a["action"]
@@ -115,6 +145,7 @@ def controller(ctx):
     # Element-IDs sind auf eine Aufgabe beschränkt, nie zwischen Aufgaben geteilt.
     if "mac_ui" not in ctx.services:
         ctx.services["mac_ui"] = MacUI()
+    ctx.services["mac_ui"].cancel = ctx.cancel
     return ctx.services["mac_ui"]
 
 

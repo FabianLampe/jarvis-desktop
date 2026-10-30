@@ -122,6 +122,9 @@ class Bridge:
         self._last_tps: Optional[float] = None
         self._online: Optional[bool] = None
         self._seq = 0
+        self._chat_generation = 0
+        self._filler_epoch = 0
+        self._chat_generation_lock = threading.RLock()
         self._workers: list[threading.Thread] = []
         self._stop = threading.Event()
         self._browser_ctl: Optional[BrowserController] = None
@@ -170,21 +173,25 @@ class Bridge:
     def _start_filler(self, request: str, answered: threading.Event) -> None:
         if not (self._cfg.voice.get("filler_enabled", True) and self._hub.connected):
             return
-        threading.Thread(target=self._filler_loop, args=(request, answered),
+        generation = (self._chat_generation, self._filler_epoch)
+        threading.Thread(target=self._filler_loop, args=(request, answered, generation),
                          name="jarvis-filler", daemon=True).start()
 
-    def _filler_loop(self, request: str, answered: threading.Event) -> None:
+    def _filler_loop(self, request: str, answered: threading.Event, generation=None) -> None:
         """Füllt echte Stille mit geprüften Inhalten (Fakten-Liste, echtes Wetter) — nie mit
         Modell-Text, der Fakten erfinden oder die Antwort vorwegnehmen könnte."""
         import time as _t
+        generation = generation or (self._chat_generation, self._filler_epoch)
         said, last_filler, started = 0, 0.0, _t.monotonic()
         while said < self.FILLER_MAX and not answered.wait(0.25):
+            if self._stop.is_set() or generation != (self._chat_generation, self._filler_epoch):
+                return
             now = _t.monotonic()
             quiet_since = max(self._last_said, started)        # Stille erst ab dieser Anfrage zählen
             if now - quiet_since < self.FILLER_SILENCE_S or now - last_filler < self.FILLER_GAP_S:
                 continue
             line = self._fillers.next(request)
-            if answered.is_set():
+            if answered.is_set() or generation != (self._chat_generation, self._filler_epoch):
                 return
             self._hub.say(line)
             said, last_filler = said + 1, _t.monotonic()
@@ -365,10 +372,13 @@ class Bridge:
 
     def new_chat(self) -> dict[str, Any]:
         """Neuer Chat: laufende Aktion abbrechen, Verlauf und Kontextanzeige zurücksetzen."""
-        if self._tasks is not None:
-            self._tasks.cancel()
-        self._hub.stop_speaking()
-        self._chat.reset()
+        with self._chat_generation_lock:
+            self._chat_generation += 1
+            self._filler_epoch += 1
+            if self._tasks is not None:
+                self._tasks.cancel()
+            self._hub.stop_speaking()
+            self._chat.reset()
         self._last_tps = None
         self._push_status()
         return {"ok": True, "context": self._chat.context_info()}
@@ -395,6 +405,8 @@ class Bridge:
 
     def cancel(self) -> dict[str, Any]:
         """Stopp-Knopf: alle laufenden Aufgaben und die Sprachausgabe beenden."""
+        with self._chat_generation_lock:
+            self._filler_epoch += 1
         if self._tasks is not None:
             self._tasks.cancel()
         if self._rt is not None:
@@ -446,6 +458,7 @@ class Bridge:
 
     def _run_stream(self, sid: str, text: str, force_7b: bool,
                     speak_back: bool = False, voice_origin: bool = False) -> None:
+        generation = self._chat_generation
         # Reihenfolge: Werkzeug-Schnellpfad (App öffnen, „merk dir“) → Browser-Schnellpfad →
         # Werkzeug-Agent (mehrstufig, LLM) → normaler Chat.
         import re as _re
@@ -482,14 +495,16 @@ class Bridge:
                               "Es läuft gerade nichts, was ich abbrechen könnte, Sir.", voice_origin)
             return
         tools_on = self._cfg.tools.enabled
+        if generation != self._chat_generation:
+            return
         if tools_on and fast_path(text):
-            self._run_tool_stream(sid, text, speak_back, voice_origin)
+            self._run_tool_stream(sid, text, speak_back, voice_origin, generation)
             return
         if self._cfg.browser.enabled and browser_intent.detect_all(text):
             self._run_browser_stream(sid, text, speak_back, voice_origin)
             return
         if tools_on and self._runtime().agent.wants_tools(text):
-            self._run_tool_stream(sid, text, speak_back, voice_origin)
+            self._run_tool_stream(sid, text, speak_back, voice_origin, generation)
             return
 
         # Sprach-Anfrage (voice_origin): NICHT vorab ins Panel streamen — der
@@ -512,6 +527,9 @@ class Bridge:
 
         try:
             for ev in self._chat.send(text, force_7b, model_override=self._quick_model()):
+                if generation != self._chat_generation:
+                    answered.set()
+                    return
                 kind = ev.get("type")
                 if kind == "token":
                     if speaker is not None:
@@ -552,6 +570,8 @@ class Bridge:
                         self._push_status()
         except Exception:
             answered.set()
+            if generation != self._chat_generation:
+                return
             log.exception("Stream %s abgestürzt", sid)
             if voice_origin:
                 self._hub.say("Ein interner Fehler, Sir. Die Details stehen im Protokoll.")
@@ -567,6 +587,7 @@ class Bridge:
         """Browser-Befehl über den BrowserAgent. Aktions-Ansagen + Abschluss
         werden bei Sprache gesprochen (Daemon zeigt sie synchron als Caption),
         bei getippter Eingabe als Text ins Panel geschrieben."""
+        generation = self._chat_generation
         try:
             agent = self._ensure_browser_agent()
         except Exception:
@@ -581,6 +602,8 @@ class Bridge:
             return
         try:
             for ev in agent.run(text):
+                if generation != self._chat_generation:
+                    return
                 kind = ev.get("type")
                 spoken = ev.get("text", "")
                 if kind == "action":
@@ -597,13 +620,15 @@ class Bridge:
                         self._js("jarvis.onMeta", sid, {"type": "done", "tps": None})
         except Exception:
             log.exception("Browser-Stream %s abgestürzt", sid)
+            if generation != self._chat_generation:
+                return
             if voice_origin:
                 self._hub.say("Im Browser ging etwas schief, Sir.")
             else:
                 self._js("jarvis.onToken", sid, "Im Browser ging etwas schief, Sir.")
                 self._js("jarvis.onMeta", sid, {"type": "done", "tps": None})
         finally:
-            if not voice_origin:
+            if generation == self._chat_generation and not voice_origin:
                 self._js("jarvis.onState", "idle", None)
 
     def _offer_pending(self) -> bool:
@@ -635,11 +660,16 @@ class Bridge:
             self._js("jarvis.onToken", sid, msg)
             self._js("jarvis.onMeta", sid, {"type": "done", "tps": None})
 
-    def _run_tool_stream(self, sid: str, text: str, speak_back: bool, voice_origin: bool) -> None:
+    def _run_tool_stream(self, sid: str, text: str, speak_back: bool, voice_origin: bool,
+                         expected_generation: int | None = None) -> None:
         """Werkzeug-Auftrag als eigene, parallele Aufgabe: Aktionen werden angezeigt (bzw. angesagt),
         Bestätigungen erscheinen im Panel, der Abschluss stammt aus den tatsächlichen Ergebnissen."""
-        tm = self._task_manager()
-        task = tm.begin(text, voice=voice_origin)
+        with self._chat_generation_lock:
+            generation = self._chat_generation if expected_generation is None else expected_generation
+            if generation != self._chat_generation:
+                return
+            tm = self._task_manager()
+            task = tm.begin(text, voice=voice_origin)
         parallel = len(tm.active()) > 1
         final = ""
         answered = threading.Event()
@@ -648,6 +678,8 @@ class Bridge:
         self._js("jarvis.onState", "think", None)
         try:
             for ev in task.agent.run(text, history=list(self._chat.history[-6:])):
+                if generation != self._chat_generation:
+                    return
                 kind = ev.get("type")
                 if kind == "reasoning":
                     if ev.get("active"):
@@ -684,6 +716,8 @@ class Bridge:
             log.exception("Werkzeug-Stream %s abgestürzt", sid)
             final = "Bei der Ausführung ist ein interner Fehler aufgetreten, Sir. Details im Protokoll."
             tm.finish(task, False, final)
+            if generation != self._chat_generation:
+                return
             if voice_origin:
                 self._hub.say(final)
             else:
@@ -693,8 +727,10 @@ class Bridge:
             answered.set()
             if task.active:
                 tm.finish(task, False, final or "Beendet")
-            self._chat.remember_exchange(text, final)
-            if not voice_origin and not tm.active():
+            with self._chat_generation_lock:
+                if generation == self._chat_generation:
+                    self._chat.remember_exchange(text, final)
+            if generation == self._chat_generation and not voice_origin and not tm.active():
                 self._js("jarvis.onState", "idle", None)
 
     # ----------------------------------------------------- Status-Loop

@@ -67,10 +67,32 @@ class OllamaClient:
         except requests.ConnectionError as exc:
             raise OllamaUnavailable(str(exc)) from exc
         if r.status_code == 404 and model_for_404:
+            r.close()
             raise ModelMissing(model_for_404)
         if not r.ok:
-            raise OllamaError(f"HTTP {r.status_code}: {r.text[:300]}")
+            message = f"HTTP {r.status_code}: {r.text[:300]}"
+            r.close()
+            raise OllamaError(message)
         return r
+
+    @staticmethod
+    def _decode(raw, model):
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError) as exc:
+            raise OllamaError("Ungültige JSON-Antwort von Ollama") from exc
+        if not isinstance(data, dict) or not isinstance(data.get("message", {}), dict):
+            raise OllamaError("Ungültiges Antwortformat von Ollama")
+        if "done" in data and not isinstance(data["done"], bool):
+            raise OllamaError("Ungültiger Abschlussstatus von Ollama")
+        for key in ("content", "thinking"):
+            if data.get("message", {}).get(key) is not None and not isinstance(data["message"][key], str):
+                raise OllamaError("Ungültiger Nachrichtentext von Ollama")
+        if error := data.get("error"):
+            if "not found" in str(error).lower():
+                raise ModelMissing(model)
+            raise OllamaError(str(error))
+        return data
 
     def thinking_control(self, model: str, enabled: bool) -> bool | str | None:
         """Nur unterstützte think-Werte senden; ältere Ollama-Versionen bleiben nutzbar.
@@ -84,7 +106,16 @@ class OllamaClient:
                                         timeout=(2, 5)) as r:
                     if not r.ok:
                         return None
-                    self._thinking_controls[model] = r.json()
+                    info = r.json()
+                    if not isinstance(info, dict):
+                        return None
+                    controls = info.get("thinking") or {}
+                    if not isinstance(controls, dict):
+                        return None
+                    values = controls.get("values", [])
+                    if not isinstance(values, list) or any(type(v) not in (bool, str) for v in values):
+                        return None
+                    self._thinking_controls[model] = info
             except (requests.RequestException, ValueError):
                 return None
         info = self._thinking_controls[model]
@@ -97,7 +128,8 @@ class OllamaClient:
             if names:
                 default = controls.get("default")
                 return "medium" if "medium" in names else default if default in names else names[0]
-            if not values and "thinking" in info.get("capabilities", []):
+            capabilities = info.get("capabilities") or []
+            if not values and isinstance(capabilities, list) and "thinking" in capabilities:
                 return True
         elif False in values:
             return False
@@ -135,6 +167,8 @@ class OllamaClient:
         if num_predict is not None:
             payload["options"]["num_predict"] = num_predict
         started = time.monotonic()
+        if cancel is not None and cancel.is_set():
+            raise GenerationCancelled("Abgebrochen, Sir.")
         r = self._post("/api/chat", payload, stream=True, model_for_404=model, max_time_s=max_time_s)
         try:
             for line in r.iter_lines(chunk_size=1):
@@ -144,7 +178,7 @@ class OllamaClient:
                     raise GenerationLimit("Zeitlimit der Modellgenerierung erreicht")
                 if not line:
                     continue
-                data = json.loads(line)
+                data = self._decode(line, model)
                 if err := data.get("error"):
                     # Ollama meldet fehlende Modelle teils als Fehlerobjekt im Stream
                     if "not found" in err.lower():
@@ -195,6 +229,8 @@ class OllamaClient:
         if think is not None:
             payload["think"] = think
         started = time.monotonic()
+        if cancel is not None and cancel.is_set():
+            raise GenerationCancelled("Abgebrochen, Sir.")
         if max_time_s is not None or cancel is not None:
             # Auch Tool-Generierung streamen, damit Budget/Abbruch während des Denkens
             # geprüft werden können. Den vollständigen Dialog intern zusammensetzen.
@@ -211,7 +247,7 @@ class OllamaClient:
                             raise GenerationLimit("Zeitlimit der Modellgenerierung erreicht")
                         if not line:
                             continue
-                        data = json.loads(line)
+                        data = self._decode(line, model)
                         if data.get("error"):
                             raise OllamaError(data["error"])
                         chunk = data.get("message") or {}
@@ -233,7 +269,7 @@ class OllamaClient:
             data["message"] = message
         else:
             with self._post("/api/chat", payload, stream=False, model_for_404=model) as r:
-                data = r.json()
+                data = self._decode(r.content, model)
         if max_time_s is not None and time.monotonic() - started >= max_time_s:
             raise GenerationLimit("Zeitlimit der Modellgenerierung erreicht")
         if err := data.get("error"):
@@ -249,7 +285,7 @@ class OllamaClient:
         """Wirft ein Modell aus dem VRAM (keep_alive=0). Best effort."""
         try:
             self._post("/api/chat", {"model": model, "messages": [], "keep_alive": 0},
-                       model_for_404=model)
+                       model_for_404=model).close()
             return True
         except OllamaError as exc:
             log.warning("Entladen von %s fehlgeschlagen: %s", model, exc)
@@ -259,7 +295,7 @@ class OllamaClient:
         """Lädt ein Modell in den VRAM, ohne eine Antwort zu erzeugen. Best effort."""
         try:
             self._post("/api/chat", {"model": model, "messages": [],
-                                     "keep_alive": keep_alive}, model_for_404=model)
+                                     "keep_alive": keep_alive}, model_for_404=model).close()
             return True
         except OllamaError as exc:
             log.warning("Vorladen von %s fehlgeschlagen: %s", model, exc)

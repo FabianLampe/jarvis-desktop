@@ -199,7 +199,7 @@ def tools() -> list[Tool]:
     P = {"type": "string"}
     return [
         Tool("list_dir", "files", "Listet den Inhalt eines Ordners (Standard: Arbeitsordner).",
-             {"path": {**P, "description": "Ordnerpfad"}}, (), list_dir,
+             {"path": {**P, "description": "Ordnerpfad"}, "hidden": {"type": "boolean"}}, (), list_dir,
              announce=lambda a: f"Ich sehe in {a.get('path') or 'den Arbeitsordner'} nach, Sir."),
         Tool("read_file", "files", "Liest eine Textdatei.",
              {"path": P, "offset": {"type": "integer"}, "max_chars": {"type": "integer"}},

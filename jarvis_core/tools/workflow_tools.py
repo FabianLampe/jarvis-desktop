@@ -51,8 +51,8 @@ def workflow_save(ctx, a):
         t = reg.get(step["tool"])
         if t is None:
             raise ToolError(f"Unbekanntes Werkzeug: {step['tool']}")
-        if any(k not in step["args"] for k in t.required):
-            raise ToolError(f"Fehlende Pflichtangaben für {t.name}")
+        if error := reg.argument_error(t.name, step["args"]):
+            raise ToolError(error)
     p = path(ctx, a["name"])
     data = {"name": a["name"], "description": str(a.get("description", "")), "steps": a["steps"]}
     fd, tmp = tempfile.mkstemp(dir=p.parent, suffix=".tmp")

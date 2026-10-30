@@ -228,6 +228,8 @@ The UI can be viewed without the app by opening `jarvis_app/ui/preview.html` in 
 
 ## Documentation
 
+- [Bug review 2026-10-30](docs/bug-review-2026-10-30.md): reproduced routing, JSON-writing, cancellation and input-validation defects, fixes and regression evidence.
+
 - [CONTEXT.md](CONTEXT.md): domain terms and project state
 - [docs/adr](docs/adr): architecture decision records
 - [docs/superpowers/specs](docs/superpowers/specs): design specs

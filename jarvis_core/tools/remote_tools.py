@@ -18,10 +18,15 @@ def github(ctx, a):
     action = a.get("action", "issues")
     routes = {"issues": ("GET", "issues"), "pulls": ("GET", "pulls"),
               "create_issue": ("POST", "issues"), "create_pr": ("POST", "pulls"),
-              "update_issue": ("PATCH", "issues/" + str(int(a.get("number", 0))))}
+              "update_issue": ("PATCH", "issues")}
     if action not in routes:
         raise ToolError("Unbekannte GitHub-Aktion")
     method, route = routes[action]
+    if action == "update_issue":
+        number = a.get("number")
+        if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+            raise ToolError("Gültige Issue-Nummer nötig")
+        route += "/" + str(number)
     token = os.environ.get("JARVIS_GITHUB_TOKEN", "")
     if not token and method != "GET":
         raise ToolError("JARVIS_GITHUB_TOKEN fehlt; Token mit passenden Repository-Schreibrechten einrichten")
@@ -33,21 +38,26 @@ def github(ctx, a):
         payload = {k: a[k] for k in ("title", "body") if k in a}
     if action in ("create_issue", "create_pr") and not payload.get("title"):
         raise ToolError("title fehlt")
-    if action == "update_issue" and int(a.get("number", 0)) <= 0:
-        raise ToolError("Gültige Issue-Nummer nötig")
     if action == "create_pr":
         if not a.get("head") or not a.get("base"):
             raise ToolError("head und base müssen vorhandene Branches benennen")
         payload.update(head=a["head"], base=a["base"], draft=True)
-    r = requests.request(method, f"https://api.github.com/repos/{name}/{route}", headers=headers,
-                         params={"per_page": 20, "state": "open"} if method == "GET" else None,
-                         json=payload if method != "GET" else None, timeout=(5, 30), allow_redirects=False)
-    if not r.ok:
+    try:
+        r = requests.request(method, f"https://api.github.com/repos/{name}/{route}", headers=headers,
+                             params={"per_page": 20, "state": "open"} if method == "GET" else None,
+                             json=payload if method != "GET" else None, timeout=(5, 30), allow_redirects=False)
+    except requests.RequestException:
+        raise ToolError("GitHub-Verbindungsfehler" + (
+            "; Status der Schreibaktion unklar, vor Wiederholung auf GitHub prüfen" if method != "GET" else "")) from None
+    if not 200 <= r.status_code < 300:
         raise ToolError(f"GitHub HTTP {r.status_code}; Rechte, Repository und Branches prüfen")
     raw = r.json()
     def item(x):
         return {k: x.get(k) for k in ("number", "title", "body", "state", "html_url")}
-    return result({"items": [item(x) for x in raw]} if isinstance(raw, list) else item(raw))
+    if isinstance(raw, list):
+        items = [x for x in raw if action != "issues" or "pull_request" not in x]
+        return result({"items": [item(x) for x in items], "truncated": bool(getattr(r, "links", {}).get("next"))})
+    return result(item(raw))
 
 
 def assess_github(ctx, a):

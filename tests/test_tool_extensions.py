@@ -90,7 +90,7 @@ def test_github_write_policy_and_structured_payload(tmp_path, monkeypatch):
     seen = []
     def request(method, url, **kw):
         seen.append((method, url, kw))
-        return SimpleNamespace(ok=True, json=lambda: {"number": 4, "title": "Fix", "html_url": "https://example.invalid/pr/4"})
+        return SimpleNamespace(ok=True, status_code=200, json=lambda: {"number": 4, "title": "Fix", "html_url": "https://example.invalid/pr/4"})
     monkeypatch.setattr(remote_tools.requests, "request", request)
     a = {"action": "create_pr", "repo": "owner/repo", "title": "Fix", "head": "feature", "base": "main"}
     assert rt.registry.assess(rt.ctx, "github", a).level == "confirm"
