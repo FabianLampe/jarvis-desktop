@@ -28,6 +28,8 @@
 
   // Zustands-Modifikatoren laut Spec (Basis = konfigurierte Werte)
   var STATE_MODS = {
+    sleep:  { bloom: 0.12, speed: 0.12, flows: 1, impulse: 0.1, core: 0.25, haloPulse: 0, corePulse: 0 },
+    boot:   { bloom: 1.5, speed: 1.9, flows: 2, impulse: 1.5, core: 1.2, haloPulse: 1, corePulse: 0 },
     idle:   { bloom: 0.75, speed: 1.0, flows: 1, impulse: 1,   core: 1.0, haloPulse: 0, corePulse: 0 },
     listen: { bloom: 1.3,  speed: 1.0, flows: 1, impulse: 1,   core: 1.3, haloPulse: 1, corePulse: 0 },
     think:  { bloom: 1.1,  speed: 2.5, flows: 2, impulse: 1.3, core: 1.0, haloPulse: 0, corePulse: 0 },

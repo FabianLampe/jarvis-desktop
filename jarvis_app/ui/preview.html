@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <title>J.A.R.V.I.S. — Preview-Harness (gemockte Bridge)</title>
 <link rel="stylesheet" href="css/app.css">
+<link rel="stylesheet" href="css/startup.css">
 <style>
   /* Nur Harness: dunkler „Desktop"-Hintergrund + zentrierte Bühne */
   html, body {
@@ -25,6 +26,11 @@
   body { display: flex; align-items: center; justify-content: center; }
   #stage { height: 780px; }
   #panel { width: 560px; }
+  @media (max-width: 900px) {
+    #stage { width: 100%; height: 100%; justify-content: center; }
+    #stage > #orbzone { display: none; }
+    #panel { width: min(100%, 560px); height: 100%; }
+  }
 </style>
 <script>
 /* Gemockte pywebview-Bridge — MUSS vor app.js definiert sein.
@@ -32,10 +38,91 @@
  *                ?zone=500 (Orb-Größe) · ?nochat=1 (kein Beispieldialog)
  */
 (function () {
+  window.JARVIS_PREVIEW = true;
   var Q = new URLSearchParams(location.search);
   var zone = parseInt(Q.get('zone') || '360', 10);
   var open = Q.get('open') === '1';
   var P = function (v) { return Promise.resolve(v); };
+  var demoRun = 0;
+  var soundtrack = new Audio('/preview-soundtrack');
+  soundtrack.preload = 'none';
+  var musicFade = null;
+  var demoMusic = {configured: false, file: '', title: '', playing: false, error: ''};
+  var musicNote = '';
+  var musicReady = fetch('/preview-music.json').then(function (r) {
+    if (!r.ok) return null;
+    return r.json();
+  }).then(function (info) {
+    if (info) Object.assign(demoMusic, info, {title: info.file});
+  }).catch(function () {}); // A plain static server still supports the silent preview.
+  function publishMusic() {
+    if (window.jarvis) window.jarvis.onMusic(Object.assign({}, demoMusic));
+  }
+  function stopPreviewMusic(fade) {
+    clearInterval(musicFade);
+    function end() { soundtrack.pause(); soundtrack.currentTime = 0; demoMusic.playing = false; publishMusic(); }
+    if (!fade || soundtrack.paused) { end(); return; }
+    var start = performance.now(), volume = soundtrack.volume;
+    musicFade = setInterval(function () {
+      var p = Math.min(1, (performance.now() - start) / 650);
+      soundtrack.volume = volume * (1 - p);
+      if (p === 1) { clearInterval(musicFade); end(); }
+    }, 25);
+  }
+  function playPreviewMusic(run) {
+    stopPreviewMusic(false);
+    musicNote = '';
+    if (!demoMusic.configured) return;
+    soundtrack.volume = 0.28;
+    soundtrack.play().then(function () {
+      if (run !== demoRun) return;
+      demoMusic.playing = true; publishMusic();
+    }).catch(function (error) {
+      if (run !== demoRun) return;
+      musicNote = error.name === 'NotAllowedError' ? 'Für Ton auf „Noch einmal“ klicken' : 'Audiodatei konnte nicht abgespielt werden';
+      demoMusic.playing = false; publishMusic();
+    });
+  }
+  soundtrack.addEventListener('ended', function () { demoMusic.playing = false; publishMusic(); });
+  var xp = {mode: 'idle', phase: 'idle', steps: [], progress: 0};
+  function experience(mode) {
+    if (mode === 'music_stop') { stopPreviewMusic(true); return P({ok: true}); }
+    var run = ++demoRun;
+    if (mode === 'wake') playPreviewMusic(run); else stopPreviewMusic(false);
+    xp = {mode: mode, phase: mode === 'sleep' ? 'standby' : mode === 'reboot' ? 'shutdown' : 'running',
+      steps: [], progress: 0, run_id: run};
+    if (window.jarvis) window.jarvis.onExperience(xp);
+    if (mode === 'sleep') return P({ok: true});
+    open = true;
+    window.jarvis.onPanel({open: true, side: 'right'});
+    if (mode === 'reboot') {
+      setTimeout(function () { if (demoRun === run) experience('boot'); }, 1800);
+      return P({ok: true});
+    }
+    var labels = ['Oberfläche', 'Soundtrack', 'Gedächtnis', 'Intelligenz', 'Stimme', 'Tagesbriefing'];
+    xp.steps = labels.map(function (label, i) {return {id: String(i), label: label, state: 'pending', detail: ''};});
+    labels.forEach(function (_, i) {
+      setTimeout(function () {
+        if (demoRun !== run) return;
+        xp.steps[i].state = 'loading'; xp.steps[i].detail = 'Wird geprüft …';
+        window.jarvis.onExperience(xp);
+      }, i * 850 + 200);
+      setTimeout(function () {
+        if (demoRun !== run) return;
+        xp.steps[i].state = i === 1 && !demoMusic.playing ? 'skip' : 'ok';
+        xp.steps[i].detail = i === 1 ? musicNote || (demoMusic.playing ? demoMusic.file :
+          demoMusic.configured ? 'Soundtrack ist für „Aufwachen“ bereit' : 'Audiodatei über „Musik wählen“ hinzufügen') :
+          ['Overlay verbunden', '', 'Lokaler Speicher erreichbar', 'qwen2.5:14b', 'Sprach-Daemon verbunden', 'Wetter und Tagesübersicht geladen'][i];
+        xp.progress = Math.round((i + 1) / labels.length * 100);
+        if (i === labels.length - 1) {
+          xp.phase = 'ready'; xp.warnings = 0;
+          window.pywebview.api.request_briefing();
+        }
+        window.jarvis.onExperience(xp);
+      }, i * 850 + 850);
+    });
+    return P({ok: true});
+  }
 
   var DEMO_ANSWER = 'Selbstverständlich, Sir. Die Diagnose läuft bereits — ' +
     'alle Systeme arbeiten innerhalb der Parameter. Der Reaktor liefert stabile ' +
@@ -43,6 +130,19 @@
 
   window.pywebview = {
     api: {
+      ui_ready: function () {
+        return musicReady.then(function () {
+          publishMusic();
+          if (Q.get('experience')) experience(Q.get('experience'));
+          return xp;
+        });
+      },
+      request_experience: experience,
+      choose_music: function () { return P({ok: false, message: 'Die Dateiauswahl steht in der echten Jarvis-App zur Verfügung.'}); },
+      cancel: function () { ++demoRun; stopPreviewMusic(false); xp.phase = 'cancelled'; window.jarvis.onExperience(xp); return P({ok: true}); },
+      new_chat: function () { return P({ok: true}); },
+      set_mute: function (muted) { return P({muted: muted, daemon: false}); },
+      cancel_task: function () { return P({cancelled: 0}); },
       get_config: function () {
         return P({
           orb: { seed: 5, sparks: 250, veins: 25, rays: 4,
@@ -60,6 +160,13 @@
       },
       send_message: function (text, force) {
         var sid = 's' + Date.now();
+        var normalized = text.toLowerCase().replace(/[^a-zäöüß ]/g, '').replace(/^(hey )?jarvis */, '').trim();
+        var mode = { 'wake up': 'wake', 'wach auf': 'wake', 'geh schlafen': 'sleep', 'system reboot': 'reboot', 'system neustarten': 'reboot' }[normalized];
+        if (mode) {
+          experience(mode);
+          setTimeout(function () {window.jarvis.onMeta(sid, {type: 'done'});}, 100);
+          return P({stream_id: sid});
+        }
         setTimeout(function () { window.jarvis.onMeta(sid, { type: 'route', lane: force ? 'heavy' : 'general', model: force ? 'qwen2.5:7b' : 'qwen2.5:3b' }); }, 30);
         setTimeout(function () { window.jarvis.onState('think', null); }, 60);
         var delay = 900;
@@ -85,12 +192,17 @@
       },
       push_to_talk: function () { return P({ sent: false }); },
       request_briefing: function () {
-        setTimeout(function () { window.jarvis.onBriefing({
+        var briefingRun = demoRun;
+        setTimeout(function () {
+          if (briefingRun !== demoRun) return;
+          window.jarvis.onBriefing({
           datetime: 'Dienstag, 16. Juni, 22 Uhr 30',
           weather: { temp_now: 14, temp_max: 18, temp_min: 9, text: 'bewölkt', ort: 'Hamburg' },
           mails: [{ sender: 'Alice', subject: 'Rechnung Juni' }, { sender: 'Bob', subject: 'Meeting morgen' }],
           issues: [{ number: 5, title: 'Orb flackert bei Last' }],
-          system: { cpu: 12, ram: 41, vram: 63 }, repo: 'FabianLampe/jarvis-desktop' }); }, 100);
+          system: { cpu: 12, ram: 41, vram: 63 }, repo: 'FabianLampe/jarvis-desktop' });
+          stopPreviewMusic(true);
+        }, 100);
         return P({ ok: true });
       },
       reset_chat: function () { return P({ ok: true }); },
@@ -138,7 +250,7 @@
 </script>
 </head>
 <body>
-  <!-- Markup-Kopie von index.html — bei Änderungen synchron halten -->
+  <!-- VORSCHAU: ausschließlich simulierte Dienste und Demodaten. -->
   <div id="stage" class="side-right">
     <div id="orbzone" class="pywebview-drag-region" title="Klick: Panel · Rad: Größe · Ziehen: verschieben">
       <canvas id="orb"></canvas>
@@ -151,6 +263,8 @@
       <div id="panel-head">
         <span id="panel-title">J.A.R.V.I.S.</span>
         <span class="head-right">
+          <button id="btn-newchat" class="ctl-btn" title="Neuen Chat starten (leert Verlauf und Kontext)">NEU</button>
+          <button id="btn-mute" class="ctl-btn" title="Mikrofon stumm schalten — Jarvis hört dann nicht mehr zu">MIC</button>
           <button id="btn-briefing" class="ctl-btn" title="Tagesbriefing">▦</button>
           <span id="panel-online">ONLINE <span class="blink">▮</span></span>
         </span>
@@ -162,15 +276,19 @@
         <span>CPU <b id="st-cpu">—</b></span>
         <span>RAM <b id="st-ram">—</b></span>
         <span>VRAM <b id="st-vram">—</b></span>
+        <span id="st-ctx-wrap">KONTEXT <b id="st-ctx">—</b></span>
         <span id="st-heavy-wrap">SCHWERLAST: <b id="st-heavy">—</b></span>
       </div>
 
+      <div id="ctxbar" title="Kontextfenster des Modells"><div id="ctxfill"></div></div>
+      <div id="tasks" class="hidden"></div>
       <div id="log"></div>
       <div id="dashboard" class="hidden"></div>
 
       <div id="inputrow">
         <input id="input" type="text" autocomplete="off" spellcheck="false"
                placeholder="Befehl eingeben, Sir …">
+        <button id="btn-stop" class="ctl-btn stop hidden" title="Laufende Aktion abbrechen">■</button>
         <button id="btn-7b" class="ctl-btn" title="Schwerlast-Spur (7B) für die nächste Anfrage">7B</button>
         <button id="btn-mic" class="ctl-btn" disabled
                 title="Push-to-talk — verfügbar, sobald der Sprach-Daemon verbunden ist">●</button>
@@ -185,6 +303,8 @@
   </div>
 
   <script src="js/orb-engine.js"></script>
+  <script src="js/startup-hud.js"></script>
+  <script src="js/startup.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

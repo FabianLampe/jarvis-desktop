@@ -48,7 +48,7 @@ class FakeHub:
     def start(self, **kwargs):
         pass
 
-    def say(self, text):
+    def say(self, text, completion_id=None):
         self.spoken.append(text)
         return True
 

@@ -31,6 +31,8 @@ DEFAULT_VOICE: dict[str, Any] = {
     "stt_compute": "int8",
     "tts_engine": "edge",             # edge (schnell) | xtts (Stimm-Klon, CPU-langsam)
     "tts_voice": "de-DE-FlorianMultilingualNeural",
+    "speech_rate": 1.0,               # Sprechtempo (tonhöhentreu), < 1 = langsamer
+    "sentence_start_rate": None,      # Satzanfang noch ruhiger (z. B. 0.82), gleitet ins Grundtempo
     "qwen_python": ".venv-qwen/bin/python",   # tts_engine: qwen (MLX, eigene venv)
     "qwen_model": None,                       # Standard: mlx-community/Qwen3-TTS-12Hz-1.7B-Base-bf16
     "qwen_ref_audio": None,                   # Referenz-WAV (None ⇒ xtts_speaker_wav)
@@ -134,6 +136,15 @@ class ResearchConfig:
 
 
 @dataclass(frozen=True)
+class ExperienceConfig:
+    startup_animation: bool = True
+    startup_briefing: bool = True
+    music_file: Optional[str] = None
+    music_volume: float = 0.28
+    music_duck_volume: float = 0.07
+
+
+@dataclass(frozen=True)
 class AppConfig:
     profile: Profile
     orb: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_ORB))
@@ -145,6 +156,7 @@ class AppConfig:
     reminders: RemindersConfig = field(default_factory=RemindersConfig)
     research: ResearchConfig = field(default_factory=ResearchConfig)
     integrations: dict[str, dict[str, Any]] = field(default_factory=dict)
+    experience: ExperienceConfig = field(default_factory=ExperienceConfig)
     ollama_host: str = "http://127.0.0.1:11434"
     keep_alive: str = "30m"
     ws_host: str = "127.0.0.1"
@@ -288,6 +300,13 @@ def load(path: str | Path | None = None,
         max_sources=int(rs.get("max_sources", 4)),
         max_chars_per_source=int(rs.get("max_chars_per_source", 3000)))
     integrations = {str(n): dict(v or {}) for n, v in (raw.get("integrations") or {}).items()}
+    xp = raw.get("experience") or {}
+    experience = ExperienceConfig(
+        startup_animation=bool(xp.get("startup_animation", True)),
+        startup_briefing=bool(xp.get("startup_briefing", True)),
+        music_file=xp.get("music_file") or None,
+        music_volume=max(0.0, min(1.0, float(xp.get("music_volume", 0.28)))),
+        music_duck_volume=max(0.0, min(1.0, float(xp.get("music_duck_volume", 0.07)))))
 
     return AppConfig(
         profile=Profile(
@@ -301,7 +320,7 @@ def load(path: str | Path | None = None,
             quick=p.get("quick"),
         ),
         tools=tools, knowledge=knowledge, reminders=reminders, research=research,
-        integrations=integrations,
+        integrations=integrations, experience=experience,
         orb=orb,
         voice=voice,
         browser=browser,

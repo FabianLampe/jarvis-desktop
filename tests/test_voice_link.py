@@ -36,6 +36,7 @@ def hub_events():
         on_state=lambda s, a: events.append(("state", s, a)),
         on_clients_changed=lambda c: events.append(("clients", c)),
         on_utterance=lambda t: events.append(("utterance", t)),
+        on_speech_finished=lambda token: events.append(("speech_finished", token)),
     )
     # Auf den Server warten
     end = time.monotonic() + 5
@@ -83,6 +84,51 @@ def test_disconnect_clears_connected(hub_events):
     ws.close()
     assert wait_for(lambda: not hub.connected)
     assert ("clients", False) in events
+
+
+def test_briefing_completion_is_correlated_over_websocket(hub_events):
+    hub, ws, events = hub_events
+    assert hub.say('Das war Ihr Bericht, Sir.', completion_id='wake-123')
+    assert json.loads(ws.recv(timeout=5)) == {
+        'type': 'speak', 'text': 'Das war Ihr Bericht, Sir.', 'completion_id': 'wake-123'}
+    ws.send(json.dumps({'type': 'speech_finished', 'completion_id': 'wake-123'}))
+    assert wait_for(lambda: ('speech_finished', 'wake-123') in events)
+
+
+def test_daemon_link_receives_and_acknowledges_tagged_speech(hub_events):
+    import asyncio
+    from contextlib import suppress
+    from voice_daemon.link import Link
+    hub, _, events = hub_events
+
+    async def exchange():
+        link = Link(f'ws://127.0.0.1:{hub.port}')
+        link._loop = asyncio.get_running_loop()
+        received = link._loop.create_future()
+        def speak(text, completion_id):
+            received.set_result((text, completion_id))
+            link.send_speech_finished(completion_id)
+        link.on_speak = speak
+        session = asyncio.create_task(link._session(link.url))
+        try:
+            for _ in range(100):
+                if link.connected:
+                    break
+                await asyncio.sleep(.01)
+            assert link.connected
+            assert hub.say('Letzte Info.', completion_id='wake-link')
+            assert await asyncio.wait_for(received, 3) == ('Letzte Info.', 'wake-link')
+            for _ in range(100):
+                if ('speech_finished', 'wake-link') in events:
+                    break
+                await asyncio.sleep(.01)
+            assert ('speech_finished', 'wake-link') in events
+        finally:
+            session.cancel()
+            with suppress(asyncio.CancelledError):
+                await session
+
+    asyncio.run(exchange())
 
 
 def test_port_fallback_when_default_taken():

@@ -216,3 +216,21 @@ def test_output_uses_device_rate_and_fixed_blocks(monkeypatch):
     m._close_out()
     played = np.concatenate(st.writes)
     assert abs(int(np.count_nonzero(np.abs(played) > 1e-6)) - 48000 // 2) < 1500   # 0,5 s in 48 kHz
+
+
+def test_tempo_slows_down_without_changing_pitch():
+    sr = 24000
+    d = sine(2.0, f=220.0)
+    out = M.apply_tempo(d, sr, rate=0.9)
+    assert abs(out.size / d.size - 1 / 0.9) < 0.03                    # 10 % langsamer = ~11 % länger
+    spec = np.abs(np.fft.rfft(out)); f = np.fft.rfftfreq(out.size, 1 / sr)
+    assert abs(f[int(np.argmax(spec))] - 220.0) < 5                     # Tonhöhe bleibt
+
+
+def test_sentence_start_is_slower_than_the_rest():
+    sr = 24000
+    d = sine(3.0)
+    plain = M.apply_tempo(d, sr, rate=0.9)
+    ramped = M.apply_tempo(d, sr, rate=0.9, start_rate=0.75)
+    assert ramped.size > plain.size                                     # Anfang zusätzlich gedehnt
+    assert M.apply_tempo(d, sr, rate=1.0).size == d.size                # 1.0 = unverändert

@@ -204,6 +204,44 @@ Sprachausgabe: `tts_engine: voicebox` (lokaler Voicebox-Server, `POST /generate/
 Offen/nicht gebaut: Gesichtserkennung (bewusst), WhatsApp (bewertet, abgelehnt), Discord-Empfang, Offline-Übersetzung
 ungetestet. Odysseus bleibt Referenz (AGPL-Hinweis, ADR 0004) — ADR 0003 gilt für diese Linie nicht mehr.
 
+**Umgesetzt (2026-10-28): Start-/Aufwachsequenz** (`jarvis_app/experience.py`,
+`jarvis_app/ui/js/startup.js`): „Jarvis, system reboot“ / „System neustarten“ startet
+ausdrücklich **nur Jarvis** durch Prozess-Neustart. „Wake up“ / „wach auf“ verlässt
+Standby, lädt das bestehende Tagesbriefing mit aktuellem Wetter und spielt optional
+eine lokal ausgewählte Audiodatei. Animiertes Overlay mit echten Startprüfungen,
+Fehlerhinweisen und Abbruch; beim Sprechen/Zuhören wird Musik leiser. Standby hält
+die Wake-Word-Erkennung aktiv, stoppt Musik, laufende Aufgaben und ausstehende
+Sprachausgaben. Dateiauswahl über „Musik wählen“, Konfiguration unter `experience`;
+Dateipfad wird lokal in `experience.json` gespeichert. Die vom Nutzer bereitgestellte
+MP3 „ACDC - Back In Black (Official Video).mp3“ ist in `config.yaml` über ihren
+Downloads-Pfad eingetragen; sie wird nicht ins Projekt kopiert. Der Soundtrack
+endet mit Fade nach der letzten tatsächlich abgespielten Briefing-Ansage, gekoppelt
+über `completion_id` / `speech_finished` zwischen App und Sprach-Daemon. Sprechpausen
+beenden ihn nicht; ohne Stimme endet er nach der Anzeige des Berichts. Beide Prozesse
+müssen für das neue Abschlussereignis neu gestartet werden.
+Automatisierte Ablauf-/Audio-Tests mit Testdiensten;
+Browser-Vorschau ist ausdrücklich eine Simulation mit Demodaten.
+Gestaltung nach Nutzerkorrektur: Der freigegebene goldene Nervenbahn-Orb bleibt
+erhalten. `startup-hud.js` zeichnet ausschließlich Interface-Linien und Eckmarken;
+`startup.js` übernimmt die Parameter der bestehenden Orb-Engine. Rahmen,
+Seitenanzeigen und Prüfmodule bauen sich zeitversetzt auf, Neustart dimmt sie ab.
+Prüfzeilen werden bei Statusupdates weiterverwendet, damit der Aufbau nicht flackert.
+Die Vorschau bleibt nach Abschluss stehen und bietet „Noch einmal“; die echte App
+kehrt automatisch zum Briefing zurück. Reduzierte Bewegung wird berücksichtigt.
+`python -m jarvis_app.preview` stellt die Oberfläche und ausschließlich die konfigurierte
+Audiodatei lokal auf 127.0.0.1:8768 bereit (inkl. Audio-Range-Requests). Die Vorschau spielt
+die echte MP3 bei „Noch einmal“ und blendet nach Anzeige des Demo-Berichts aus; keine
+Demo-Sprachausgabe. Wiedergabe und automatisches Ende im Browser geprüft.
+Validierung: vollständige lokale Suite 255 Tests bestanden (2 Integrationstests
+abgewählt); nach der Ergänzung zum Schnellmodell 52 gezielte Tests bestanden.
+Nach der Kopplung von Musikende und Sprachabschluss: 70 gezielte Tests bestanden,
+einschließlich echter lokaler WebSocket-Roundtrips. MP3-Decodierung, Ducking und
+vorzeitiges Ausblenden zusätzlich mit der bereitgestellten Datei gegen Testausgabe geprüft.
+Zusätzlich nativen Cocoa-Start → echten App-Prozess-Neustart → WebSocket-Reconnect
+in einer getrennten Testinstanz erfolgreich geprüft. Die bereitgestellte MP3 ist
+lesbar (Stereo, 44,1 kHz). Mikrofon und finale Ausgabe über die Lautsprecher sind noch
+nicht live geprüft.
+
 ## Umsetzungs-Reihenfolge (V1)
 
 1. **Fork klonen** nach F:, venv `py -3.11`, `pip install -r requirements.txt` (+ optional Whisper),

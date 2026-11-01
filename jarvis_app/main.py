@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import os
 from pathlib import Path
 
 from jarvis_core import config as core_config
@@ -62,6 +63,7 @@ def main() -> None:
                         help="Konfig-Profil überschreiben (Standard: auto)")
     parser.add_argument("--debug", action="store_true",
                         help="WebView-Devtools aktivieren")
+    parser.add_argument("--reboot", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -84,7 +86,7 @@ def main() -> None:
     import webview
     from .bridge import Bridge, PANEL_MIN_H, _zone
 
-    bridge = Bridge(cfg)
+    bridge = Bridge(cfg, startup_mode="reboot" if args.reboot else "boot")
     layout = bridge.load_layout()
     zone = _zone(layout["orb_px"])
 
@@ -108,6 +110,20 @@ def main() -> None:
     from typing import Any, cast
     gui = cast(Any, current().gui)            # cocoa (macOS) · edgechromium (Windows)
     webview.start(bridge.on_started, (window,), gui=gui, debug=args.debug, http_server=True)
+    if bridge.restart_requested:
+        # Replace only this Python process. The voice daemon reconnects on its own.
+        # Python-created lock FDs are non-inheritable and close across exec.
+        argv = restart_argv(args)
+        os.execv(sys.executable, argv)
+
+
+def restart_argv(args) -> list[str]:
+    argv = [sys.executable, "-m", "jarvis_app.main", "--config", str(Path(args.config).resolve()), "--reboot"]
+    if args.profile:
+        argv.extend(["--profile", args.profile])
+    if args.debug:
+        argv.append("--debug")
+    return argv
 
 
 if __name__ == "__main__":

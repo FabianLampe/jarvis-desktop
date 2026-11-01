@@ -23,9 +23,10 @@ class Link:
         self._ws = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self.on_push_to_talk: Callable[[], None] = lambda: None
-        self.on_speak: Callable[[str], None] = lambda _t: None
+        self.on_speak: Callable[..., None] = lambda *_: None
         self.on_stop: Callable[[], None] = lambda: None
         self.on_mute: Callable[[bool], None] = lambda _m: None
+        self.on_standby: Callable[[bool], None] = lambda _s: None
 
     def send_muted(self, value: bool) -> None:
         self._send({"type": "muted", "value": bool(value)})
@@ -52,6 +53,10 @@ class Link:
     def send_briefing(self) -> None:
         """Löst in der App das Tagesbriefing aus (Doppelklatsch / Sprachbefehl)."""
         self._send({"type": "briefing"})
+
+    def send_speech_finished(self, completion_id: str) -> None:
+        """Acknowledge playback ending, including cancellation or a synthesis failure."""
+        self._send({"type": "speech_finished", "completion_id": completion_id})
 
     @property
     def connected(self) -> bool:
@@ -94,6 +99,7 @@ class Link:
             # Fremde Dienste auf dem Port antworten nicht mit unserem Protokoll → kein Handshake-Erfolg
             self._ws = ws
             self.url = url
+            self.on_standby(False)  # a restarted app begins awake; server replays standby if needed
             log.info("Mit J.A.R.V.I.S.-App verbunden (%s)", url)
             async for raw in ws:
                 try:
@@ -107,10 +113,16 @@ class Link:
                     self.on_stop()
                 elif kind == "mute":
                     self.on_mute(bool(msg.get("value")))
+                elif kind == "standby":
+                    self.on_standby(bool(msg.get("value")))
                 elif kind == "speak":
                     text = str(msg.get("text", "")).strip()
                     if text:
-                        self.on_speak(text)
+                        completion_id = msg.get("completion_id")
+                        if isinstance(completion_id, str) and completion_id:
+                            self.on_speak(text, completion_id)
+                        else:
+                            self.on_speak(text)
         return False
 
 

@@ -8,6 +8,8 @@
   'use strict';
 
   var engine = null;
+  var startup = null;
+  var pendingExperience = null;
   var api = null;
   var busy = false;
   var force7b = false;
@@ -268,7 +270,18 @@
       typerPush(s.typer, chunk, null);
     },
     onState: function (state, amplitude) {
+      if (startup && startup.sleeping) return;
       if (engine) engine.setState(state, amplitude);
+    },
+    onExperience: function (state) {
+      pendingExperience = state;
+      if (startup) startup.update(state);
+    },
+    onMusic: function (music) { if (startup) startup.music(music); },
+    onCancelled: function () { setBusy(false); },
+    onPanel: function (res) {
+      $('panel').classList.toggle('hidden', !res.open);
+      $('stage').className = 'side-' + (res.side || 'right');
     },
     onStatus: function (st) {
       $('st-model').textContent = st.model || '—';
@@ -489,9 +502,12 @@
       });
       engine.resize(cfg.zone);
       engine.setState('idle');
+      startup = new window.JarvisStartup(api, engine);
+      if (pendingExperience) startup.update(pendingExperience);
       return api.get_status();
     }).then(function (st) {
       if (st) window.jarvis.onStatus(st);
+      if (api.ui_ready) api.ui_ready().then(function (s) { window.jarvis.onExperience(s); });
     });
   }
 

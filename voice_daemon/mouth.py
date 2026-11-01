@@ -98,6 +98,26 @@ def trim_tail(data: np.ndarray, sr: int, keep_s: float = 0.18, max_cut_s: float 
     return data[:end]
 
 
+def apply_tempo(data: np.ndarray, sr: int, rate: float = 1.0, start_rate: Optional[float] = None,
+                ramp_s: float = 1.2) -> np.ndarray:
+    """Tonhöhentreue Tempoänderung (Pedalboard/Rubber Band). rate < 1 = langsamer. Mit start_rate beginnt
+    jeder Satz noch ruhiger und geht über ramp_s gleitend ins Grundtempo über — das gleicht aus, dass
+    die Stimme Satzanfänge gern hastig spricht und zum Ende langsamer wird."""
+    start = rate if start_rate is None else start_rate
+    if data.size < sr * 0.2 or (abs(rate - 1.0) < 1e-3 and abs(start - 1.0) < 1e-3):
+        return data
+    from pedalboard import time_stretch  # pyright: ignore[reportPrivateImportUsage]
+    n = data.size
+    if abs(start - rate) > 1e-3:
+        factor = np.full(n, rate, dtype=np.float64)
+        ramp = min(n, int(ramp_s * sr))
+        factor[:ramp] = np.linspace(start, rate, ramp)
+    else:
+        factor = float(rate)
+    out = time_stretch(data.astype(np.float32).reshape(1, -1), sr, stretch_factor=factor, high_quality=True)
+    return np.asarray(out, dtype=np.float32).reshape(-1)
+
+
 def trim_lead(data: np.ndarray, sr: int, keep_s: float = 0.04) -> np.ndarray:
     """Kürzt die Stille vor dem ersten Laut auf keep_s — Qwen beginnt jeden Teil mit bis zu 0,2 s Stille,
     die sich an Nahtstellen zu hörbaren Pausen addiert."""
@@ -339,6 +359,8 @@ class Mouth:
         self.voicebox_url = "http://127.0.0.1:17493"
         self.voicebox_profile = None    # Name oder ID des Voicebox-Stimmprofils
         self.voicebox_engine = None     # optional, z. B. "qwen" / "chatterbox" (Voicebox-Engine)
+        self.speech_rate = 1.0           # < 1 = langsamer (tonhöhentreu); gilt für qwen/voicebox/xtts
+        self.sentence_start_rate: Optional[float] = None   # Satzanfang noch ruhiger, gleitet ins Grundtempo
         self.qwen_python = ".venv-qwen/bin/python"
         self.qwen_model = None
         self.qwen_ref_audio = ""
@@ -392,7 +414,7 @@ class Mouth:
         assert self._xtts is not None
         wav = self._xtts.tts(text=text, speaker_wav=self.speaker_wav,
                              language=self.language, split_sentences=False)
-        return np.asarray(wav, dtype=np.float32), 24000
+        return apply_tempo(np.asarray(wav, dtype=np.float32), 24000, self.speech_rate, self.sentence_start_rate), 24000
 
     # --------------------------------------------------------- Voicebox
 
@@ -421,7 +443,8 @@ class Mouth:
         if self._qwen is None:
             self._qwen = QwenWorker(self.qwen_python, self.qwen_model)
         data, sr = self._qwen.synth(text, self.qwen_ref_audio, self._qwen_reference_text(), self.qwen_language)
-        return trim_lead(trim_tail(strip_blips(data, sr), sr), sr), sr
+        data = trim_lead(trim_tail(strip_blips(data, sr), sr), sr)
+        return apply_tempo(data, sr, self.speech_rate, self.sentence_start_rate), sr
 
     def _say_qwen(self, text: str, on_amplitude, on_sentence) -> bool:
         clean = speakable(text, self.max_chars)
@@ -482,7 +505,7 @@ class Mouth:
         data, sr = sf.read(io.BytesIO(r.content), dtype="float32")
         if data.ndim > 1:
             data = data.mean(axis=1)
-        return trim_tail(data, sr), sr
+        return apply_tempo(trim_tail(data, sr), sr, self.speech_rate, self.sentence_start_rate), sr
 
     def _say_voicebox(self, text: str, on_amplitude, on_sentence) -> bool:
         """True, wenn Voicebox gesprochen hat. False ⇒ nicht erreichbar/Fehler, Aufrufer weicht aus."""

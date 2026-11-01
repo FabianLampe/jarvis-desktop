@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from jarvis_core import browser_intent
+from jarvis_core.lifecycle import lifecycle_command
 from jarvis_core.agent import BrowserAgent
 from jarvis_core.memory.reminders import ReminderService
 from jarvis_core.platform import current as current_platform
@@ -103,11 +104,14 @@ class Bridge:
                  chat: ChatService | None = None,
                  sysmon: SystemMonitor | None = None,
                  hub: VoiceHub | None = None,
-                 layout_path: Path | None = None):
+                 layout_path: Path | None = None,
+                 startup_mode: str = "boot"):
         self._cfg = cfg
         self._client = OllamaClient(cfg.ollama_host)
         self._platform = current_platform()
         self._rt: Optional[Runtime] = None
+        self._runtime_lock = threading.RLock()
+        self._interaction_epoch = 0
         self._chat = chat or ChatService(cfg, client=self._client, facts=self._facts)
         self._sysmon = sysmon or SystemMonitor(cfg.profile.gpu_monitor, self._platform)
         self._hub = hub or VoiceHub(cfg.ws_host, cfg.ws_port)
@@ -136,18 +140,23 @@ class Bridge:
         self._last_said = 0.0
         _say = self._hub.say
 
-        def say_and_note(text: str) -> bool:      # merkt sich, wann zuletzt gesprochen wurde (Stille messen)
+        def say_and_note(text: str, **kwargs) -> bool:      # merkt sich, wann zuletzt gesprochen wurde (Stille messen)
             import time as _t
             self._last_said = _t.monotonic()
-            return _say(text)
-        self._hub.say = say_and_note
+            return _say(text, **kwargs)
+        setattr(self._hub, "say", say_and_note)   # Instanz-Hülle (VoiceHub und Test-Hubs)
+        self._startup_mode = startup_mode
+        self.restart_requested = False
+        from .experience import Experience
+        self._experience = Experience(self)
 
     # ------------------------------------------------ Werkzeug-Laufzeit
 
     def _runtime(self) -> Runtime:
-        if self._rt is None:
-            self._rt = build_runtime(self._cfg, self._client, interactive=True)
-        return self._rt
+        with self._runtime_lock:
+            if self._rt is None:
+                self._rt = build_runtime(self._cfg, self._client, interactive=True)
+            return self._rt
 
     def _task_manager(self) -> TaskManager:
         if self._tasks is None:
@@ -179,6 +188,8 @@ class Bridge:
         import time as _t
         said, last_filler, started = 0, 0.0, _t.monotonic()
         while said < self.FILLER_MAX and not answered.wait(0.25):
+            if self._experience.sleeping or self._experience.running:
+                return
             now = _t.monotonic()
             quiet_since = max(self._last_said, started)        # Stille erst ab dieser Anfrage zählen
             if now - quiet_since < self.FILLER_SILENCE_S or now - last_filler < self.FILLER_GAP_S:
@@ -237,7 +248,7 @@ class Bridge:
         text = ("Verpasste Erinnerung, Sir: " if d.get("missed") else "Erinnerung, Sir: ") + d["text"]
         self._platform.notify("Jarvis – Erinnerung", d["text"])
         self._js("jarvis.onNotice", text)
-        if self._hub.connected:
+        if self._hub.connected and not self._experience.sleeping:
             self._hub.say(text)
 
     def _start_telegram(self) -> None:
@@ -278,9 +289,10 @@ class Bridge:
                         on_utterance=self._daemon_utterance,
                         on_caption=self._daemon_caption,
                         on_briefing=self._daemon_briefing,
-                        on_muted=self._daemon_muted)
+                        on_muted=self._daemon_muted,
+                        on_speech_finished=self._experience.speech_finished)
         threading.Thread(target=self._status_loop, name="jarvis-status", daemon=True).start()
-        threading.Thread(target=self._warmup, name="jarvis-warmup", daemon=True).start()
+        # The UI-ready handshake starts the visible startup checks/model warmup.
         threading.Thread(target=self._task_monitor, name="jarvis-taskmon", daemon=True).start()
         if self._cfg.tools.enabled:
             for fn in (self._start_reminders, self._start_telegram):
@@ -310,6 +322,10 @@ class Bridge:
 
     def _on_closing(self):
         self._stop.set()
+        self._experience.close()
+        if self._tasks is not None:
+            self._tasks.cancel()
+        self._hub.stop_speaking()
         self._write_layout()
         if self._browser_ctl is not None:
             self._browser_ctl.shutdown()
@@ -329,6 +345,26 @@ class Bridge:
         return self._browser_agent
 
     # ------------------------------------------------------- JS → Python
+
+    def ui_ready(self) -> dict[str, Any]:
+        return self._experience.ready()
+
+    def request_experience(self, mode: str) -> dict[str, Any]:
+        return self._experience.start(mode)
+
+    def choose_music(self) -> dict[str, Any]:
+        return self._experience.select_music()
+
+    def hide_panel(self) -> None:
+        """Standby: nur der (schlafende) Orb bleibt sichtbar."""
+        if self._window is not None and self._panel_open:
+            self.toggle_panel()
+        self._js("jarvis.onPanel", {"open": self._panel_open, "side": self._side})
+
+    def show_panel(self) -> None:
+        if self._window is not None and not self._panel_open:
+            self.toggle_panel()
+        self._js("jarvis.onPanel", {"open": self._panel_open, "side": self._side})
 
     def get_config(self) -> dict[str, Any]:
         p = self._cfg.profile
@@ -393,13 +429,17 @@ class Bridge:
         """Zustimmung/Ablehnung für genau eine angezeigte Aktion."""
         return {"ok": self._runtime().confirms.resolve(str(action_id), bool(approve))}
 
-    def cancel(self) -> dict[str, Any]:
+    def cancel(self, cancel_experience: bool = True) -> dict[str, Any]:
         """Stopp-Knopf: alle laufenden Aufgaben und die Sprachausgabe beenden."""
+        self._interaction_epoch += 1
         if self._tasks is not None:
             self._tasks.cancel()
         if self._rt is not None:
             self._rt.agent.cancel()
         self._hub.stop_speaking()
+        if cancel_experience:
+            self._experience.cancel()
+        self._js("jarvis.onCancelled")
         return {"ok": True}
 
     def push_to_talk(self) -> dict[str, Any]:
@@ -443,6 +483,22 @@ class Bridge:
 
     def _run_stream(self, sid: str, text: str, force_7b: bool,
                     speak_back: bool = False, voice_origin: bool = False) -> None:
+        command = lifecycle_command(text)
+        if command:
+            result = self.request_experience(command)
+            if voice_origin:
+                self._hub.say(result["message"])     # auch per Stimme bestätigen („Ja, Sir?“, „Standby, Sir.“)
+            else:
+                self._js("jarvis.onToken", sid, result["message"])
+                self._js("jarvis.onMeta", sid, {"type": "done", "tps": None})
+            return
+        if self._experience.sleeping:
+            self._reply_plain(sid, "Ich bin im Standby, Sir. Sagen Sie ‚Jarvis, wake up‘.", False)
+            return
+        if self._experience.running:
+            self._reply_plain(sid, "Die Startsequenz läuft noch, Sir. Sie können sie jederzeit abbrechen.", False)
+            return
+        epoch = self._interaction_epoch
         # Reihenfolge: Werkzeug-Schnellpfad (App öffnen, „merk dir“) → Browser-Schnellpfad →
         # Werkzeug-Agent (mehrstufig, LLM) → normaler Chat.
         import re as _re
@@ -495,7 +551,10 @@ class Bridge:
         buf: list[str] = []
         last_flush = 0.0
         answered = threading.Event()                  # erste gesprochene Antwort ⇒ kein Füllsatz mehr
-        speaker = _SentenceSpeaker(self._hub.say, on_first=answered.set) if speak_back else None
+        def say_current(line):
+            if epoch == self._interaction_epoch:
+                self._hub.say(line)
+        speaker = _SentenceSpeaker(say_current, on_first=answered.set) if speak_back else None
         if speak_back:
             self._start_filler(text, answered)
 
@@ -509,6 +568,9 @@ class Bridge:
 
         try:
             for ev in self._chat.send(text, force_7b, model_override=self._quick_model()):
+                if epoch != self._interaction_epoch:
+                    answered.set()
+                    break
                 kind = ev.get("type")
                 if kind == "token":
                     if speaker is not None:
@@ -561,6 +623,7 @@ class Bridge:
         """Browser-Befehl über den BrowserAgent. Aktions-Ansagen + Abschluss
         werden bei Sprache gesprochen (Daemon zeigt sie synchron als Caption),
         bei getippter Eingabe als Text ins Panel geschrieben."""
+        epoch = self._interaction_epoch
         try:
             agent = self._ensure_browser_agent()
         except Exception:
@@ -575,6 +638,8 @@ class Bridge:
             return
         try:
             for ev in agent.run(text):
+                if epoch != self._interaction_epoch:
+                    break
                 kind = ev.get("type")
                 spoken = ev.get("text", "")
                 if kind == "action":
@@ -633,6 +698,7 @@ class Bridge:
         """Werkzeug-Auftrag als eigene, parallele Aufgabe: Aktionen werden angezeigt (bzw. angesagt),
         Bestätigungen erscheinen im Panel, der Abschluss stammt aus den tatsächlichen Ergebnissen."""
         tm = self._task_manager()
+        epoch = self._interaction_epoch
         task = tm.begin(text, voice=voice_origin)
         parallel = len(tm.active()) > 1
         final = ""
@@ -642,6 +708,8 @@ class Bridge:
         self._js("jarvis.onState", "think", None)
         try:
             for ev in task.agent.run(text, history=list(self._chat.history[-6:])):
+                if epoch != self._interaction_epoch:
+                    break
                 kind = ev.get("type")
                 if kind == "action":
                     tm.update(task, current=_re.sub(r",?\s*Sir\.?$", "", ev["text"]), status="running")
@@ -727,10 +795,17 @@ class Bridge:
         self._push_status()
 
     def _daemon_state(self, state: str, amplitude: Optional[float]) -> None:
+        self._experience.voice_state(state)
+        if self._experience.sleeping:
+            return
         self._js("jarvis.onState", state, amplitude)
 
     def _daemon_clients(self, connected: bool) -> None:
         self._js("jarvis.onDaemon", connected)
+        if connected:
+            self._experience.voice_connected()
+        else:
+            self._experience.voice_disconnected()
 
     def _daemon_utterance(self, text: str) -> None:
         """Erkannter Sprachbefehl: im Panel zeigen, beantworten, Antwort vorlesen.
@@ -755,6 +830,8 @@ class Bridge:
         return self._briefing
 
     def request_briefing(self) -> dict[str, Any]:
+        if self._experience.sleeping or self._experience.running:
+            return {"ok": False, "message": "Jarvis ist im Standby oder startet gerade."}
         t = threading.Thread(target=self._run_briefing, name="jarvis-briefing", daemon=True)
         self._workers.append(t)
         t.start()

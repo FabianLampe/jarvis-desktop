@@ -85,6 +85,70 @@ Triggered by double clap, the voice command "Briefing", or the button in the pan
 
 ## Panel controls
 
+### Start, Standby und Aufwachen
+
+Beim App-Start fährt das Interface um den bestehenden goldenen Orb hoch. Sein Design
+und seine konfigurierten Darstellungsparameter bleiben erhalten: Zuerst leuchtet der
+Orb auf, dann werden Rahmen, Verbindungslinien, Seitenanzeigen und Prüfmodule
+nacheinander eingeblendet. Beim Neustart dimmt die Oberfläche vor dem erneuten Aufbau
+ab. Die Anzeige folgt den
+tatsächlichen Prüfungen von Oberfläche, Gedächtnis, lokalem Modell, Sprachverbindung
+und Tagesbriefing. Nicht verfügbare Dienste erscheinen als Hinweis. 100 % bedeutet,
+dass alle Prüfungen abgeschlossen sind; die Ergebnisse bleiben einzeln sichtbar.
+
+| Befehl im Chat oder nach dem Wake Word | Wirkung |
+|---|---|
+| `Jarvis, wake up` / `Jarvis, wach auf` | Aufwachanimation, lokale Hintergrundmusik und aktuelles Tagesbriefing mit Wetter, Gmail, GitHub und Systemstatus |
+| `Jarvis, geh schlafen` | Jarvis-Standby: beendet Aktionen und Musik; das Wake Word bleibt aktiv |
+| `Jarvis, system reboot` / `Jarvis, system neustarten` | Beendet und startet **nur die Jarvis-App** neu; der Mac wird nicht neu gestartet. Der separat gestartete Sprach-Daemon verbindet sich wieder. |
+| `Jarvis, Musik aus` | Stoppt den Hintergrund-Soundtrack |
+
+Per Sprache: zuerst **„Hey Jarvis“**, dann nach dem Signal **„wake up“** oder
+**„System reboot“** sagen. Alternativ die entsprechenden Schaltflächen im Panel verwenden.
+Standby ist kein macOS-Ruhezustand: Bei ausgeschaltetem oder schlafendem Mac bzw.
+stummgeschaltetem Mikrofon kann Jarvis keinen Sprachbefehl empfangen.
+
+**Eigene Musik:** Im Panel **♫ MUSIK WÄHLEN** anklicken und die lokale AC/DC-Datei
+(MP3, WAV, FLAC, OGG oder AIFF) auswählen. Die Datei wird nicht kopiert; ihre Auswahl
+wird im Jarvis-Datenordner in `experience.json` gespeichert. Ohne Datei laufen Animation
+und Briefing weiter. Es wird kein Song heruntergeladen oder mitgeliefert.
+
+Die Hintergrundlautstärke wird unabhängig von der Systemlautstärke gesteuert und beim
+Sprechen/Zuhören abgesenkt. Beim Aufwachen läuft der Soundtrack bis zum Ende der
+Startprüfungen und der letzten tatsächlich abgespielten Briefing-Ansage; anschließend
+blendet er aus. Sprechpausen beenden ihn nicht. Ohne Sprachverbindung endet die Musik,
+sobald der Bericht im Panel steht. Abbruch, Standby oder Verbindungsabbruch während
+des Vorlesens stoppen sie ebenfalls. App und Sprach-Daemon müssen die aktuelle Version
+verwenden, damit das Ende der letzten Ansage zurückgemeldet wird.
+`experience.music_volume` und `experience.music_duck_volume`
+in `config.yaml` regeln die Pegel von 0 bis 1. `experience.music_file` kann alternativ
+einen lokalen Pfad setzen; eine Auswahl im Panel hat Vorrang.
+
+Auf diesem Mac ist die bereitgestellte Datei „ACDC - Back In Black (Official Video).mp3“
+aus dem Downloads-Ordner in `experience.music_file` eingetragen. Sie bleibt an ihrem
+ursprünglichen Speicherort; der Song wird nicht in das Projekt kopiert.
+
+`experience.startup_animation` aktiviert die Startsequenz,
+`experience.startup_briefing` das automatische Startbriefing. „Wake up“ ruft immer
+frische Briefingdaten ab. Ohne Sprach-Daemon erscheint der Bericht im Panel und wird
+bei dessen späterer Verbindung einmal vorgelesen. Abbrechen oder Standby verwirft
+noch ausstehende Ansagen.
+
+Vorschau ohne echte Dienste: `jarvis_app/ui/preview.html?open=1&nochat=1&experience=wake`
+(lokal mit `python -m jarvis_app.preview` starten und die ausgegebene Adresse öffnen).
+Dieser Vorschau-Server liest die konfigurierte Musikdatei direkt; der Ton startet
+per „Noch einmal“, falls der Browser die automatische Wiedergabe blockiert.
+Die Vorschau blendet ihn nach den Demo-Prüfungen und der Anzeige der Demo-Infos aus;
+sie erzeugt keine Sprachausgabe. Diese Vorschau kennzeichnet ihre Demodaten;
+„Neustart“ simuliert dort nur die Animation. Die fertige Ansicht bleibt zur Kontrolle
+stehen und lässt sich mit „Noch einmal“ erneut abspielen. In der echten App öffnet
+sich nach Abschluss das Tagesbriefing. Die Systemeinstellung für reduzierte Bewegung
+deaktiviert die Einblendanimationen.
+
+Referenzen für den schrittweisen Interface-Aufbau:
+[JARVIS START UP](https://www.youtube.com/watch?v=zZ0tYNEv0cQ) und
+[Jarvis Start Up :D](https://www.youtube.com/watch?v=RjF_j6QZpxc).
+
 - **MIC** (panel header): mutes the microphone. The voice daemon closes the audio stream (the macOS recording indicator goes off), so Jarvis hears nothing, no wake word, no clap, no recording. Click again to listen. The state survives a daemon restart. Jarvis can still speak (reminders, replies to typed input).
 - **NEU**: starts a new chat — cancels running actions and speech, clears the history and resets the context meter. Voice: "Neuer Chat".
 - **KONTEXT** (status bar + bar): tokens used of the model's context window (`num_ctx`), measured from Ollama (or estimated before the first answer). Yellow from 70 %, red from 90 %; Jarvis warns at 85 %. History is trimmed automatically at ~70 % so Ollama never silently cuts the start.

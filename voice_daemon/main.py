@@ -20,6 +20,7 @@ import time
 import numpy as np
 
 from jarvis_core import config as core_config
+from jarvis_core.lifecycle import lifecycle_command
 
 from .commands import classify
 from .ears import Ears
@@ -87,6 +88,9 @@ class Daemon:
         self.mouth.qwen_ref_text = str(v.get("qwen_ref_text") or "")
         self.mouth.qwen_language = str(v.get("qwen_language", "german"))
         self.mouth.effects_chain = list(v.get("effects_chain") or [])
+        self.mouth.speech_rate = float(v.get("speech_rate", 1.0))
+        self.mouth.sentence_start_rate = (float(v["sentence_start_rate"])
+                                          if v.get("sentence_start_rate") is not None else None)
         self.mouth.voicebox_url = str(v.get("voicebox_url", "http://127.0.0.1:17493")).rstrip("/")
         self.mouth.voicebox_profile = v.get("voicebox_profile") or None
         self.mouth.voicebox_effects = str(v.get("voicebox_effects", "profile"))
@@ -102,14 +106,18 @@ class Daemon:
         self._follow_up_s = float(v.get("follow_up_s", 0.0))
         self._pending_speak = False    # Antwort der App steht noch aus
         self._drop_speak = False       # nächste Antwort verwerfen (abgebrochen)
-        self._speak_q: "queue.Queue[tuple[str, bool]]" = queue.Queue()
+        self._standby = False
+        self._speech_generation = 0
+        self._speech_lock = threading.Lock()
+        self._speak_q: "queue.Queue[tuple[str, bool, int, str | None]]" = queue.Queue()
         self._recent_spoken: list[tuple[float, str]] = []   # (Zeit, Text) gegen Selbst-Echo
         threading.Thread(target=self._speaker_loop, name="daemon-speaker", daemon=True).start()
 
         self.link.on_push_to_talk = self.ears.trigger_listen
         self.link.on_speak = self._on_speak
-        self.link.on_stop = self.mouth.stop
+        self.link.on_stop = self._on_stop
         self.link.on_mute = self._on_mute
+        self.link.on_standby = self._on_standby
 
     # -------------------------------------------------------------- Ablauf
 
@@ -142,10 +150,38 @@ class Daemon:
                 log.info("Eigene Stimme erkannt (Lautsprecher → Mikrofon) — verworfen: %r", text[:70])
                 self.link.send_state("idle")
                 return
+            # Im Standby genügt „Hey Jarvis“ allein (die Aufnahme danach darf leer sein). Folgt ein
+            # echter Befehl, wird er nach dem Aufwachen ausgeführt.
+            if self._standby and self.link.connected:
+                lc = lifecycle_command(text) if text else None
+                if lc == "sleep":
+                    self.link.send_state("idle")
+                    return
+                if lc not in ("reboot", "music_stop"):
+                    log.info("Aufgeweckt aus dem Standby durch %r", text or "„Hey Jarvis“")
+                    self._standby = False
+                    self.link.send_utterance("Jarvis, wach auf")
+                    if text and lc is None:
+                        t = threading.Timer(self.WAKE_COMMAND_DELAY_S, self.link.send_utterance, args=(text,))
+                        t.daemon = True
+                        t.start()
+                    return
             if not text:
                 self.link.send_state("idle")
                 if speech_seen:  # gehört, aber nicht verstanden → erneut zuhören
                     self._speak(MSG_NOT_UNDERSTOOD, follow_up=True)
+                return
+
+            # Exact lifecycle commands never reach a model/shell, including while asleep.
+            lifecycle = lifecycle_command(text)
+            if lifecycle and self.link.connected:
+                self._on_stop()
+                if lifecycle in ("wake", "reboot"):
+                    self._standby = False
+                self.link.send_utterance(text)
+                return
+            if self._standby:
+                self.link.send_state("idle")
                 return
 
             # Sprach-Auslöser fürs Tagesbriefing (Fallback zum Doppelklatsch)
@@ -160,9 +196,9 @@ class Daemon:
             command = classify(text)
             if command == "sleep":
                 log.info("Schlaf-Befehl: %r", text)
-                self._drop_pending()
-                self.link.send_state("idle")
-                self._speak(MSG_SLEEP, follow_up=False)  # zurück zum Wake Word
+                self._on_standby(True)
+                if self.link.connected:
+                    self.link.send_utterance("Jarvis, schlafen")
                 return
             if command == "cancel":
                 log.info("Abbruch-Befehl: %r", text)
@@ -184,12 +220,7 @@ class Daemon:
     def _on_mute(self, muted: bool) -> None:
         self.ears.set_muted(muted)
         if muted:
-            while True:                          # anstehende Ausgaben verwerfen
-                try:
-                    self._speak_q.get_nowait()
-                except queue.Empty:
-                    break
-            self.mouth.stop()               # laufende Ausgabe beenden
+            self._on_stop()
             self.link.send_state("idle")
         self.link.send_muted(muted)
 
@@ -199,20 +230,49 @@ class Daemon:
 
     def _on_clap(self) -> None:
         """Doppelklatsch → Tagesbriefing in der App auslösen."""
-        self.link.send_briefing()
+        if not self._standby:
+            self.link.send_briefing()
+
+    def _on_stop(self) -> None:
+        """Cancel the full queued briefing, not just the current spoken sentence."""
+        with self._speech_lock:
+            self._speech_generation += 1
+            while True:
+                try:
+                    _, _, _, completion_id = self._speak_q.get_nowait()
+                    if completion_id:
+                        self.link.send_speech_finished(completion_id)
+                except queue.Empty:
+                    break
+            self._speak_q.put(("", False, self._speech_generation, None))  # wake a waiting text generator
+            self._pending_speak = self._drop_speak = False
+            self.mouth.stop()
+
+    def _on_standby(self, value: bool) -> None:
+        self._standby = bool(value)
+        if value:
+            self._on_stop()
+            self.ears._listen_now.clear()
+            self.link.send_state("idle")
 
     def _drop_pending(self) -> None:
         """Eine noch ausstehende App-Antwort soll nicht mehr vorgelesen werden."""
         if self._pending_speak:
             self._drop_speak = True
 
-    def _on_speak(self, text: str) -> None:
+    def _on_speak(self, text: str, completion_id: str | None = None) -> None:
+        if self._standby:
+            if completion_id:
+                self.link.send_speech_finished(completion_id)
+            return
         self._pending_speak = False
         if self._drop_speak:
             self._drop_speak = False
             log.info("Antwort verworfen (abgebrochen): %r", text[:60])
+            if completion_id:
+                self.link.send_speech_finished(completion_id)
             return
-        self._speak(text, True)
+        self._speak(text, True, completion_id)
 
     def _is_echo(self, heard: str) -> bool:
         from .commands import is_own_echo
@@ -221,32 +281,45 @@ class Daemon:
         self._recent_spoken = [(t, x) for t, x in self._recent_spoken if now - t < 12.0]
         return is_own_echo(heard, [x for _, x in self._recent_spoken])
 
-    def _speak(self, text: str, follow_up: bool = False) -> None:
+    def _speak(self, text: str, follow_up: bool = False, completion_id: str | None = None) -> None:
         """Reiht eine Ausgabe ein. Ein einziger Sprecher-Thread spielt sie nacheinander ab —
         das Mikrofon bleibt über die ganze Folge (z. B. Briefing-Zeilen) stummgeschaltet."""
-        self._speak_q.put((text, follow_up))
+        with self._speech_lock:
+            self._speak_q.put((text, follow_up, self._speech_generation, completion_id))
 
+    WAKE_COMMAND_DELAY_S = 2.2   # Befehl nach dem Aufwachen erst, wenn die Weckanimation durch ist
     STREAM_WAIT_S = 1.5      # so lange auf den nächsten Satz einer laufenden Antwort warten
 
     def _speaker_loop(self) -> None:
         while True:
-            text, follow_up = self._speak_q.get()
+            text, follow_up, generation, completion_id = self._speak_q.get()
+            if not text or generation != self._speech_generation or self._standby:
+                if completion_id:
+                    self.link.send_speech_finished(completion_id)
+                continue
             self.ears.suppress(True)                # das eigene Sprechen nicht wieder aufnehmen
-            state = {"follow_up": follow_up}
+            state = {"follow_up": follow_up, "completion_id": completion_id}
 
             def texts(first=text):
                 """Erster Text, dann alles, was während des Sprechens nachkommt (Satz für Satz
                 gestreamte Antworten, Briefing-Zeilen) — ein durchgehender Fluss ohne Pausen."""
                 self._recent_spoken.append((time.monotonic(), first))
                 yield first
-                while True:
+                if state["completion_id"]:
+                    return
+                while generation == self._speech_generation:
                     try:
-                        nxt, fu = self._speak_q.get(timeout=self.STREAM_WAIT_S)
+                        nxt, fu, next_generation, next_completion_id = self._speak_q.get(timeout=self.STREAM_WAIT_S)
                     except queue.Empty:
                         return
+                    if not nxt or next_generation != generation:
+                        return
                     state["follow_up"] = fu
+                    state["completion_id"] = next_completion_id
                     self._recent_spoken.append((time.monotonic(), nxt))
                     yield nxt
+                    if next_completion_id:
+                        return
             try:
                 self.link.send_state("thinking")
                 try:
@@ -256,13 +329,16 @@ class Daemon:
                 except Exception:
                     log.exception("Sprachausgabe fehlgeschlagen")
                 self._recent_spoken.append((time.monotonic(), text))
-                want_follow_up = state["follow_up"]
+                want_follow_up = (state["follow_up"] and generation == self._speech_generation and not self._standby)
             finally:
                 self.ears.suppress(False)           # startet den Nachlauf (Echo-Ausklang)
+                if state["completion_id"]:
+                    self.link.send_speech_finished(state["completion_id"])
                 self.link.send_state("idle")
             if want_follow_up and self._follow_up_s > 0:
                 time.sleep(self.ears._echo_tail_s)  # Gesprächsfenster erst nach dem Nachlauf öffnen
-                self.ears.trigger_listen(self._follow_up_s)
+                if generation == self._speech_generation and not self._standby:
+                    self.ears.trigger_listen(self._follow_up_s)
 
     # --------------------------------------------------------------- Start
 

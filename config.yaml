@@ -4,6 +4,14 @@
 # auto = mac auf macOS, sonst home
 profile: auto
 
+# Start-/Aufwachsequenz. Audiodatei alternativ über „Musik wählen“ im Panel setzen.
+experience:
+  startup_animation: true
+  startup_briefing: true
+  music_file: "/Users/fabian/Downloads/ACDC - Back In Black (Official Video).mp3"
+  music_volume: 0.28
+  music_duck_volume: 0.07
+
 # Fensterhintergrund: dark = durchgehend dunkle Fläche (gut bei hellem Wallpaper)
 #                     transparent = nur der Orb schwebt, Desktop scheint durch
 window_bg: dark
@@ -56,6 +64,8 @@ voice:                     # Sprach-Daemon (start_daemon.bat)
   qwen_ref_audio: "voice_daemon/assets/jarvis_reference.wav"   # tts_engine: qwen — Referenz (./start_jarvis_mac.sh --voice-ref)
   qwen_ref_text: ""        # exakter Text der Referenz; leer ⇒ wird per Whisper erkannt (bei Fehlern hier korrigieren)
   qwen_language: "german"
+  speech_rate: 0.9         # Sprechtempo der Klonstimme (tonhöhentreu): 1.0 = Original, 0.9 = 10 % langsamer
+  sentence_start_rate: 0.82  # Satzanfänge noch ruhiger, gleitet in ~1,2 s ins Grundtempo
   effects_chain:           # Jarvis-Effekt: gleicher Chorus wie in Voicebox (Pedalboard) — [] = aus
     - { type: chorus, enabled: true, params: { rate_hz: 0.2, depth: 0.8, feedback: 0.35, centre_delay_ms: 7.0, mix: 0.5 } }
   voicebox_url: "http://127.0.0.1:17493"   # tts_engine: voicebox — lokaler Voicebox-Server (App starten)

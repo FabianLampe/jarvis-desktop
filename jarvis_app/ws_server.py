@@ -4,8 +4,10 @@ Protokoll (JSON pro Nachricht):
   Daemon → App:  {"type": "state", "value": "listening"|"thinking"|"speaking"|"idle",
                   "amplitude": 0.0–1.0 (optional, nur beim Sprechen)}
                  {"type": "utterance", "text": "erkannter deutscher Satz"}
+                 {"type": "speech_finished", "completion_id": "..."}
   App → Daemon:  {"type": "push_to_talk"}
-                 {"type": "speak", "text": "Antwort, die vorgelesen werden soll"}
+                 {"type": "speak", "text": "Antwort, die vorgelesen werden soll",
+                  "completion_id": "..." (optional, Ende dieser Ansage bestätigen)}
 """
 
 from __future__ import annotations
@@ -44,7 +46,9 @@ class VoiceHub:
         self._on_caption: Callable[..., None] = lambda *_: None
         self._on_briefing: Callable[[], None] = lambda: None
         self._on_muted: Callable[[bool], None] = lambda _m: None
+        self._on_speech_finished: Callable[[str], None] = lambda _id: None
         self._muted = False
+        self._standby = False
 
     # ------------------------------------------------------------------ API
 
@@ -58,7 +62,8 @@ class VoiceHub:
               on_utterance: Callable[[str], None] | None = None,
               on_caption: Callable[[str], None] | None = None,
               on_briefing: Callable[[], None] | None = None,
-              on_muted: Callable[[bool], None] | None = None) -> None:
+              on_muted: Callable[[bool], None] | None = None,
+              on_speech_finished: Callable[[str], None] | None = None) -> None:
         """Startet den Server in einem Daemon-Thread. Portkonflikt ⇒ nur Warnung."""
         self._on_state = on_state
         self._on_clients = on_clients_changed
@@ -70,15 +75,20 @@ class VoiceHub:
             self._on_briefing = on_briefing
         if on_muted is not None:
             self._on_muted = on_muted
+        if on_speech_finished is not None:
+            self._on_speech_finished = on_speech_finished
         threading.Thread(target=self._run, name="jarvis-ws", daemon=True).start()
 
     def push_to_talk(self) -> bool:
         """Sendet Push-to-talk an alle verbundenen Daemons."""
         return self._send({"type": "push_to_talk"})
 
-    def say(self, text: str) -> bool:
+    def say(self, text: str, completion_id: str | None = None) -> bool:
         """Bittet den Daemon, eine Antwort vorzulesen."""
-        return self._send({"type": "speak", "text": text})
+        payload = {"type": "speak", "text": text}
+        if completion_id:
+            payload["completion_id"] = completion_id
+        return self._send(payload)
 
     @property
     def muted(self) -> bool:
@@ -92,6 +102,11 @@ class VoiceHub:
     def stop_speaking(self) -> bool:
         """Bricht laufende Sprachausgabe ab (Stopp-Knopf)."""
         return self._send({"type": "stop"})
+
+    def set_standby(self, value: bool) -> bool:
+        """Standby keeps the wake-word microphone active; it is distinct from mute."""
+        self._standby = bool(value)
+        return self._send({"type": "standby", "value": self._standby})
 
     def _send(self, payload: dict) -> bool:
         if not (self._loop and self._clients):
@@ -134,6 +149,8 @@ class VoiceHub:
         self._clients.add(ws)
         if self._muted:                       # Stummschaltung überlebt Daemon-Neustarts
             await ws.send(json.dumps({"type": "mute", "value": True}))
+        if self._standby:
+            await ws.send(json.dumps({"type": "standby", "value": True}))
         self._on_clients(True)
         log.info("Sprach-Daemon verbunden (%s)", ws.remote_address)
         try:
@@ -162,6 +179,10 @@ class VoiceHub:
                     self._on_briefing()
                 elif kind == "muted":
                     self._on_muted(bool(msg.get("value")))
+                elif kind == "speech_finished":
+                    completion_id = msg.get("completion_id")
+                    if isinstance(completion_id, str) and completion_id:
+                        self._on_speech_finished(completion_id)
         finally:
             self._clients.discard(ws)
             self._on_clients(self.connected)
