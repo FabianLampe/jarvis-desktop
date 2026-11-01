@@ -39,9 +39,9 @@ def in_workspace(ctx: ToolContext, p: Path) -> bool:
 def _fold(p: Path) -> str:
     """APFS/NTFS sind standardmäßig case-insensitiv: ~/.SSH ist ~/.ssh."""
     import os
-    import sys
     s = os.path.normpath(str(p))
-    return s.casefold() if sys.platform in ("darwin", "win32") else s
+    # Geheimnisverzeichnisse auch unter Linux gegen Schreibweisen wie ~/.SSH sperren.
+    return s.casefold()
 
 
 def is_protected(ctx: ToolContext, p: Path) -> bool:

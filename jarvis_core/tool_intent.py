@@ -9,13 +9,22 @@ from pathlib import Path
 from typing import Optional
 
 _G: dict[str, re.Pattern] = {
+    "git": re.compile(r"\b(git|github|repository|repo|branch|commit|pull request|issue|diff)\b", re.I),
+    "testing": re.compile(r"\b(pytest|unittest|test(?:e|en|s)?|testlauf|(?:über)?prüf(?:e|en)?|verifiziere|checksum|sha256)\b", re.I),
+    "ssh": re.compile(r"\b(ssh|raspberry|pi|pinet|remote.host|ferndiagnose)\b", re.I),
+    "analysis": re.compile(r"\b(csv|tsv|xlsx|excel|pandas|datenanalyse|fehlwerte|statistik|(?:linien|balken|säulen)?diagramm\w*|histogramm\w*|charts?|plot\w*)\b", re.I),
+    "documents_create": re.compile(r"\b(pdf|word|docx|xlsx|bericht|report|dokument)\b", re.I),
+    "workflows": re.compile(r"\b(workflow\w*|arbeitsablauf|arbeitsabläufe|ablauf|abläufe|rezept\w*)\b", re.I),
+    "mcp": re.compile(r"\bmcp\b", re.I),
+    "mac_ui": re.compile(r"\b(fenster|menü|tastenkombination|tastenkürzel|bedienungshilfen|finder|systemeinstellungen|mac.app)\b", re.I),
     "files": re.compile(r"\b(datei|dateien|ordner|verzeichnis|pfad|readme|dokumentenordner|"
                         r"lies|lese|schreib\w*|anleg\w*|erstell\w*|kopier\w*|verschieb\w*|umbenenn\w*|"
                         r"lösch\w*|entfern\w*|bearbeit\w*|ändere|speicher\w*)\b|\.(md|txt|py|json|csv|yaml|js|html)\b", re.I),
     "terminal": re.compile(r"\b(terminal|shell|befehl\w*|skript\w*|script\w*|ausführ\w*|führ\w* .* aus|"
                            r"prozess\w*|brew|git|pip|npm|python3?|laufende)\b", re.I),
     "system": re.compile(r"\b(öffne|starte|starten|app|programm|systeminfo|system-?info|lautstärke|leiser|lauter|"
-                         r"zwischenablage|benachrichtig\w*|arbeitsspeicher|prozessor|welcher mac|welche macos|betriebssystem)\b", re.I),
+                         r"zwischenablage|benachrichtig\w*|arbeitsspeicher|prozessor|welcher mac|welche macos|betriebssystem|"
+                         r"uhrzeit|datum|wie sp[äa]t|wieviel uhr|wie viel uhr|welcher tag)\b", re.I),
     "memory": re.compile(r"\b(merk|merke|merken|notiz\w*|notier\w*|vergiss|vergessen|was weißt du über|"
                          r"gespeichert\w*|erinnerst du dich|weißt du noch)\b", re.I),
     "docs": re.compile(r"\b(dokument\w*|pdf|unterlagen|wissensbasis|vertrag|im text|laut meinen|"
@@ -36,6 +45,10 @@ _G: dict[str, re.Pattern] = {
 
 def select_groups(text: str) -> set[str]:
     groups = {g for g, rx in _G.items() if rx.search(text)}
+    first = re.split(r"\s+(?:und|dann|danach)\s+", text, maxsplit=1, flags=re.I)[0]
+    if re.match(r"^(?:such|suche|google)\b", first.strip(), re.I) and not re.search(
+            r"\b(datei\w*|ordner\w*|dokument\w*|notiz\w*|wissensbasis)\b", first, re.I):
+        groups.add("research")
     # „öffne <Datei/App>“ ohne weitere Hinweise: System reicht
     if "terminal" in groups and "files" in groups and len(groups) > 2:
         groups.discard("system")
@@ -114,12 +127,21 @@ def fast_path(text: str) -> Optional[list[dict]]:
     t = text.strip()
     if (calc := _math(t)):
         return calc
-    if (w := _weather(t)):
-        return w
-    if (c := _clock(t)):
-        return c
     if (m := _REMEMBER.match(t)):
+        if re.search(r"\bund\s+(?:öffne|starte|schreib\w*|erstell\w*|speicher\w*|prüf\w*)\b", m.group("t"), re.I):
+            return None
         return [{"tool": "memory_save", "args": {"text": m.group("t").strip().rstrip("."), "kind": "fact"}}]
+    # Wetter-/Uhrzeit-Erwähnungen in Schreib-/Analyseaufträgen sind keine Einzelbefehle.
+    compound = bool(re.search(r"\b(erstell\w*|schreib\w*|speicher\w*|recherchier\w*|analys\w*|"
+                              r"öffne|starte|lies|lese|erinner\w*|(?:über)?prüf\w*|teste|testen|kopier\w*|verschieb\w*|lösch\w*|exportier\w*)\b", t, re.I))
+    if not compound:
+        w, c = _weather(t), _clock(t)
+        if w and c:
+            return None
+        if w and len(set(re.findall(r"\b(?:heute|morgen|übermorgen)\b", t, re.I))) > 1:
+            return None
+        if w or c:
+            return w or c
     if (m := _OPEN.match(t)):
         name = m.group("n").strip()
         if (app := installed_app(name)):

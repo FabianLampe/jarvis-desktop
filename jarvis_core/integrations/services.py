@@ -258,6 +258,8 @@ def integration_status(ctx: ToolContext, a: dict) -> ToolResult:
     for n, label in (("translation", "Offline-Übersetzung"), ("face_recognition", "Gesichtserkennung")):
         from .optional import optional_status
         lines.append(optional_status(ctx.cfg.integrations.get(n) or {}, n).line(label))
+    from ..tools.extension_utils import status_lines
+    lines.extend(status_lines(ctx.cfg))
     return ToolResult(True, "\n".join(lines))
 
 

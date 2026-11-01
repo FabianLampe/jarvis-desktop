@@ -6,6 +6,7 @@ sounddevice>=0.4.6         # Mikrofon/Lautsprecher (PortAudio gebündelt)
 soundfile>=0.12            # MP3/WAV-Decode (libsndfile gebündelt)
 edge-tts>=6.1              # deutsche TTS-Stimme (tts_engine: edge, braucht Internet)
 numpy>=1.24
+pedalboard>=0.9,<1         # konfigurierte Chorus-/Effektkette in voice_daemon.mouth
 mcp>=1.20                  # MCP-Client für chrome-devtools-mcp (Browser-Steuerung; braucht Node/npx + Chrome)
 
 # Offline-Ausweichpfad für die Sprachausgabe (tts_engine: system):

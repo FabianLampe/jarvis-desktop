@@ -15,11 +15,13 @@ Ereignisse:
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Iterator
 
 from .config import AppConfig
-from .ollama_client import ModelMissing, OllamaClient, OllamaUnavailable
+from .ollama_client import ModelMissing, OllamaClient, OllamaUnavailable, OllamaError, GenerationCancelled
 from .persona import messages_with_persona
+from .reasoning import generation_options
 from .router import route
 
 log = logging.getLogger("jarvis.chat")
@@ -39,16 +41,43 @@ class ChatService:
         self.client = client or OllamaClient(cfg.ollama_host)
         self.history: list[dict[str, str]] = []
         self.facts = facts          # Callable[[str], list[str]] | None — Gedächtnis-Fakten
+        self._cancel = threading.Event()
+        self._history_lock = threading.RLock()
+        self._generation = 0
+        self._active: set[threading.Event] = set()
+
+    def cancel(self) -> None:
+        with self._history_lock:
+            self._cancel.set()
+            for event in self._active:
+                event.set()
 
     # ------------------------------------------------------------------ Chat
 
     def send(self, text: str, force_7b: bool = False,
              model_override: str | None = None) -> Iterator[dict[str, Any]]:
+        cancel = threading.Event()
+        with self._history_lock:
+            generation = self._generation
+            self._cancel = cancel
+            self._active.add(cancel)
+        stream = self._send(text, force_7b, model_override, cancel, generation)
+        try:
+            for event in stream:
+                if generation != self._generation:
+                    return  # kein verspäteter Token/Fehler in den neuen Chat
+                yield event
+        finally:
+            stream.close()
+            with self._history_lock:
+                self._active.discard(cancel)
+
+    def _send(self, text, force_7b, model_override, cancel, generation):
         """model_override: Schnellspur — kleineres Modell, solange Aufgaben das große belegen."""
         from dataclasses import replace
         profile = self.cfg.profile
-        decision = route(text, force_7b, profile)
-        if model_override and decision.lane != "heavy":
+        decision = route(text, force_7b, profile, self.cfg.reasoning)
+        if model_override and decision.lane not in ("heavy", "reasoning"):
             decision = replace(decision, model=model_override, reason="Schnellspur (Aufgabe läuft)")
         yield {
             "type": "route",
@@ -57,11 +86,17 @@ class ChatService:
             "reason": decision.reason,
             "heavy_requested": decision.heavy_requested,
             "heavy_unavailable": decision.heavy_unavailable,
+            "reasoning": decision.reasoning or (
+                decision.lane == "heavy" and self.cfg.reasoning.mode != "off"),
         }
         yield {"type": "state", "value": "think"}
 
-        self.history.append({"role": "user", "content": text})
-        self._trim()
+        user_message = {"role": "user", "content": text}
+        with self._history_lock:
+            if not self._current(generation, cancel):
+                return
+            self.history.append(user_message)
+            self._trim()
         facts = None
         if self.facts is not None:
             try:
@@ -69,7 +104,8 @@ class ChatService:
             except Exception:  # noqa: BLE001 — Gedächtnis darf den Chat nie blockieren
                 log.debug("Fakten nicht lesbar", exc_info=True)
         messages = messages_with_persona(self.history, facts)
-        heavy = decision.lane == "heavy"
+        heavy = decision.lane in ("heavy", "reasoning") and decision.model not in (
+            profile.general, profile.coder)
 
         if heavy:
             # ADR 0002: 3B-Paar entladen → 7B laden → antworten → 3B zurückladen
@@ -80,11 +116,26 @@ class ChatService:
 
         parts: list[str] = []
         tps = None
+        thinking_notified = False
+        options = generation_options(self.client, self.cfg, decision.model,
+                                     decision.reasoning or (
+                                         decision.lane == "heavy" and self.cfg.reasoning.mode != "off"))
+        if options:
+            options["cancel"] = cancel
         try:
+            if cancel.is_set():
+                raise GenerationCancelled("Abgebrochen, Sir.")
             for ev in self.client.chat_stream(
                 decision.model, messages,
                 num_ctx=profile.num_ctx, keep_alive=0 if heavy else self.cfg.keep_alive,
+                **options,
             ):
+                if cancel.is_set():
+                    raise GenerationCancelled("Abgebrochen, Sir.")
+                if ev.get("thinking") and not thinking_notified:
+                    # Nur ein Statussignal, der eigentliche Denktext bleibt im Backend.
+                    yield {"type": "reasoning", "active": True}
+                    thinking_notified = True
                 if token := ev.get("token"):
                     if not parts:
                         yield {"type": "state", "value": "speak"}
@@ -92,24 +143,32 @@ class ChatService:
                     yield {"type": "token", "content": token}
                 if ev.get("done"):
                     tps = ev.get("tps")
+            if not parts:
+                raise OllamaError("Das Modell hat keine vollständige Antwort geliefert")
         except OllamaUnavailable as exc:
             log.warning("Ollama nicht erreichbar: %s", exc)
-            if parts:  # Teilantwort bleibt stehen, Hinweis ans Nachrichtenende
-                self._remember_assistant(parts)
+            if parts and self._current(generation, cancel):
+                self._remember_current(parts, generation, cancel)
                 yield {"type": "error", "message": MSG_STREAM_ABORT, "fatal": False}
             else:
-                self.history.pop()  # Frage blieb unbeantwortet
+                self._discard_user(user_message)
                 yield {"type": "error", "message": MSG_UNAVAILABLE, "fatal": True}
             yield {"type": "state", "value": "idle"}
             return
         except ModelMissing as exc:
-            self.history.pop()
+            self._discard_user(user_message)
             yield {"type": "error",
                    "message": MSG_MODEL_MISSING.format(model=exc.model), "fatal": True}
             yield {"type": "state", "value": "idle"}
             return
+        except OllamaError as exc:
+            # Teilantwort sichtbar lassen, aber nicht als fertige Antwort speichern.
+            self._discard_user(user_message)
+            yield {"type": "error", "message": str(exc), "fatal": not bool(parts)}
+            yield {"type": "state", "value": "idle"}
+            return
         finally:
-            if heavy:
+            if heavy and self._current(generation, cancel):
                 # 3B-Paar zurückladen, damit das nächste Routing latenzfrei ist
                 self.client.preload(profile.general, self.cfg.keep_alive)
                 if profile.coder != profile.general:
@@ -118,7 +177,7 @@ class ChatService:
         if heavy:
             yield {"type": "swap", "phase": "restore_pair"}
 
-        self._remember_assistant(parts)
+        self._remember_current(parts, generation, cancel)
         yield {"type": "done", "tps": tps, "text": "".join(parts)}
         yield {"type": "state", "value": "idle"}
 
@@ -153,16 +212,32 @@ class ChatService:
 
     def remember_exchange(self, user: str, assistant: str) -> None:
         """Werkzeug-Aufträge in den Verlauf aufnehmen, damit Folgefragen den Bezug haben."""
-        self.history.append({"role": "user", "content": user})
-        if assistant:
-            self.history.append({"role": "assistant", "content": assistant})
+        with self._history_lock:
+            self.history.append({"role": "user", "content": user})
+            if assistant:
+                self.history.append({"role": "assistant", "content": assistant})
 
     def reset(self) -> None:
-        self.history.clear()
+        with self._history_lock:
+            self.cancel()
+            self._generation += 1
+            self.history.clear()
         if hasattr(self.client, "last_usage"):
             self.client.last_usage = None
 
     # ---------------------------------------------------------------- intern
+
+    def _current(self, generation, cancel):
+        return generation == self._generation and not cancel.is_set()
+
+    def _discard_user(self, message):
+        with self._history_lock:
+            self.history[:] = [m for m in self.history if m is not message]
+
+    def _remember_current(self, parts, generation, cancel):
+        with self._history_lock:
+            if self._current(generation, cancel):
+                self._remember_assistant(parts)
 
     def _remember_assistant(self, parts: list[str]) -> None:
         if parts:

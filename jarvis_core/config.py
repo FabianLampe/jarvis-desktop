@@ -74,6 +74,7 @@ class Profile:
     num_ctx: int = 2048
     agent: Optional[str] = None   # Modell für Werkzeugaufrufe; None ⇒ general
     quick: Optional[str] = None   # kleines Modell für Chatfragen, WÄHREND Aufgaben laufen (wartet nicht am großen)
+    reasoning: Optional[str] = None  # explizit gewähltes Thinking-Modell; None ⇒ bisheriges Routing
 
     @property
     def agent_model(self) -> str:
@@ -145,6 +146,22 @@ class ExperienceConfig:
 
 
 @dataclass(frozen=True)
+class ReasoningConfig:
+    mode: str = "auto"          # auto | on | off (in YAML in Anführungszeichen)
+    max_tokens: int = 2048      # Denken UND Antwort zusammen, je Modellaufruf
+    timeout_s: float = 120.0    # Generierungsbudget je Chat / über alle Tool-Modellaufrufe
+
+    def __post_init__(self):
+        import math
+        if self.mode not in ("auto", "on", "off"):
+            raise ConfigError("reasoning.mode muss auto|on|off sein")
+        if not 128 <= self.max_tokens <= 32768:
+            raise ConfigError("reasoning.max_tokens muss zwischen 128 und 32768 liegen")
+        if not math.isfinite(self.timeout_s) or not 1 <= self.timeout_s <= 600:
+            raise ConfigError("reasoning.timeout_s muss zwischen 1 und 600 liegen")
+
+
+@dataclass(frozen=True)
 class AppConfig:
     profile: Profile
     orb: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_ORB))
@@ -162,6 +179,8 @@ class AppConfig:
     ws_host: str = "127.0.0.1"
     ws_port: int = 8765
     window_bg: str = "dark"  # dark | transparent
+    reasoning: ReasoningConfig = field(default_factory=ReasoningConfig)
+    extensions: dict[str, Any] = field(default_factory=dict)
 
 
 class ConfigError(ValueError):
@@ -307,6 +326,33 @@ def load(path: str | Path | None = None,
         music_file=xp.get("music_file") or None,
         music_volume=max(0.0, min(1.0, float(xp.get("music_volume", 0.28)))),
         music_duck_volume=max(0.0, min(1.0, float(xp.get("music_duck_volume", 0.07)))))
+    rr = raw.get("reasoning") or {}
+    mode = rr.get("mode", "auto")
+    # YAML 1.1 liest unquoted on/off als bool; beide Schreibweisen zulassen.
+    mode = ("on" if mode else "off") if isinstance(mode, bool) else str(mode).lower()
+    reasoning = ReasoningConfig(mode=mode, max_tokens=int(rr.get("max_tokens", 2048)),
+                                timeout_s=float(rr.get("timeout_s", 120)))
+    extensions = raw.get("extensions") or {}
+    if not isinstance(extensions, dict):
+        raise ConfigError("extensions muss eine YAML-Zuordnung sein")
+    for key in ("ssh", "mcp", "mac_ui"):
+        section = extensions.get(key) or {}
+        if not isinstance(section, dict) or not isinstance(section.get("enabled", False), bool):
+            raise ConfigError(f"extensions.{key}: Zuordnung mit enabled: true|false erwartet")
+        entries_key = {"ssh": "hosts", "mcp": "servers"}.get(key)
+        if entries_key:
+            entries = section.get(entries_key, {})
+            if (not isinstance(entries, dict) or any(not isinstance(n, str) or not n for n in entries)
+                    or any(not isinstance(v, dict) for v in entries.values())):
+                raise ConfigError(f"extensions.{key}.{entries_key} muss eine Zuordnung von Namen zu Einstellungen sein")
+            if key == "mcp":
+                for server in entries.values():
+                    if (not isinstance(server.get("command", ""), str) or
+                            not isinstance(server.get("args", []), list) or
+                            not all(isinstance(v, str) for v in server.get("args", [])) or
+                            not isinstance(server.get("env_names", []), list) or
+                            not all(isinstance(v, str) for v in server.get("env_names", []))):
+                        raise ConfigError("MCP command muss Text sein, args/env_names müssen Stringlisten sein")
 
     return AppConfig(
         profile=Profile(
@@ -318,9 +364,12 @@ def load(path: str | Path | None = None,
             num_ctx=int(p.get("num_ctx", 2048)),
             agent=p.get("agent"),
             quick=p.get("quick"),
+            reasoning=p.get("reasoning"),
         ),
         tools=tools, knowledge=knowledge, reminders=reminders, research=research,
         integrations=integrations, experience=experience,
+        reasoning=reasoning,
+        extensions=extensions,
         orb=orb,
         voice=voice,
         browser=browser,

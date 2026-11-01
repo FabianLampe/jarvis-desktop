@@ -1,0 +1,13 @@
+# Optionale Daten-/Dokumentwerkzeuge: .venv/bin/python -m pip install -r requirements-tools.txt
+pandas>=2.2,<4
+openpyxl>=3.1,<4
+matplotlib>=3.8,<4
+python-docx>=1.1,<2
+reportlab>=4,<5
+# Allgemeiner MCP-Adapter (gleicher SDK-Hauptzweig wie der bestehende Browseradapter)
+mcp>=1.20,<2
+jsonschema>=4.20,<5
+# macOS Accessibility (nur auf dem Mac installiert)
+pyobjc-framework-ApplicationServices>=10; sys_platform == "darwin"
+pyobjc-framework-Cocoa>=10; sys_platform == "darwin"
+pyobjc-framework-Quartz>=10; sys_platform == "darwin"

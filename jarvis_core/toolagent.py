@@ -21,7 +21,9 @@ from typing import Any, Callable, Iterator, Optional
 from zoneinfo import ZoneInfo
 
 from .config import AppConfig
-from .ollama_client import ModelMissing, OllamaClient, OllamaUnavailable
+from .ollama_client import ModelMissing, OllamaClient, OllamaUnavailable, OllamaError
+from .reasoning import fit_tool_context, generation_options
+from .router import wants_reasoning
 from .tool_intent import fast_path, select_groups
 from .tools.registry import (ALLOW, CONFIRM, DENY, ConfirmationManager, ToolContext, ToolRegistry,
                              ToolResult, clip)
@@ -41,6 +43,14 @@ Du erledigst Aufgaben mit Werkzeugen. Regeln:
 4. Löschen, Administratorbefehle und Änderungen außerhalb des Arbeitsordners bestätigt das System selbst beim Nutzer; frage nicht extra nach.
 5. Behaupte nie, etwas getan zu haben, wenn du kein Werkzeug aufgerufen hast.
 6. Nenne bei Recherche und Dokumenten die Quelle kurz im Satz (Seite bzw. Webseite), ohne Quellenliste anzuhängen.
+7. Prüfe vor dem Abschluss alle Teilziele des Nutzerauftrags gegen die Werkzeugergebnisse.
+   Nutze bei Bedarf ein lesendes Werkzeug zum Prüfen (z. B. Datei erneut lesen / Test ausführen).
+   Korrigiere Fehler innerhalb des Budgets. Wiederhole nie blind dieselbe fehlgeschlagene Aktion.
+   Beschreibe offene Teilziele ausdrücklich; erfolgreiche Einzelwerkzeuge beweisen nicht das Gesamtziel.
+8. Vor Browser-Klicks/Texteingaben browser_snapshot abrufen; Element-IDs niemals raten.
+   Für Mac-Apps mac_ui_snapshot verwenden. Nach UI-Aktionen Snapshot erneuern.
+9. Für neue Workflows bei Bedarf tool_catalog abrufen. Workflows speichern nur feste,
+   konkrete Werkzeugargumente, keine Programmtexte oder versteckten Berechtigungen.
 Arbeitsordner: {workspace}. Relative Pfade gelten dort. Jetzt: {now} (Europe/Berlin).
 {facts}"""
 
@@ -48,11 +58,12 @@ Arbeitsordner: {workspace}. Relative Pfade gelten dort. Jetzt: {now} (Europe/Ber
 class ToolAgent:
     def __init__(self, cfg: AppConfig, client: Optional[OllamaClient], registry: ToolRegistry,
                  ctx: ToolContext, confirms: ConfirmationManager, interactive: bool = True,
-                 facts: Optional[Callable[[str], list[str]]] = None):
+                 facts: Optional[Callable[[str], list[str]]] = None, reusable: bool = True):
         self.cfg, self.client, self.reg, self.ctx = cfg, client, registry, ctx
         self.confirms = confirms
         self.interactive = interactive
         self.facts = facts
+        self.reusable = reusable
         self._lock = threading.Lock()
         self._pending_ids: set[str] = set()
 
@@ -70,7 +81,8 @@ class ToolAgent:
 
     def run(self, text: str, history: Optional[list[dict]] = None) -> Iterator[dict[str, Any]]:
         with self._lock:                        # ein Auftrag zur Zeit (Text und Sprache)
-            self.ctx.cancel.clear()
+            if self.reusable:
+                self.ctx.cancel.clear()
             self.ctx.tainted = False
             outcomes: list[dict] = []
             sources: list[dict] = []
@@ -90,11 +102,40 @@ class ToolAgent:
 
     def _step(self, name: str, args: dict, outcomes: list, sources: list) -> Iterator[dict]:
         """Bewertet, bittet ggf. um Bestätigung, führt aus. Setzt outcomes[-1]."""
+        if self.ctx.cancel.is_set():
+            outcomes.append({"tool": name, "ok": False, "text": "Abgebrochen", "cancelled": True})
+            return
+        tool = self.reg.get(name)
+        if isinstance(args, dict):
+            args = _coerce(args, tool.props if tool else {})
+        if error := self.reg.argument_error(name, args):
+            outcomes.append({"tool": name, "ok": False, "text": error})
+            yield {"type": "result", "tool": name, "ok": False, "text": error}
+            return
+        if name == "workflow_run":
+            from .tools.workflow_tools import load_workflow
+            from .tools.registry import ToolError
+            try:
+                recipe = load_workflow(self.ctx, args.get("name", ""))
+            except (ToolError, ValueError, OSError) as exc:
+                outcomes.append({"tool": name, "ok": False, "text": str(exc), "final": True})
+                yield {"type": "result", "tool": name, "ok": False, "text": str(exc)}
+                return
+            # Keine versteckte Ausführung im Handler: jede Einzelaktion läuft durch _step.
+            for step in recipe["steps"]:
+                if self.ctx.cancel.is_set():
+                    return
+                if len(outcomes) >= max(1, self.cfg.tools.max_steps):
+                    outcomes.append({"tool": name, "ok": False, "text": "Schrittlimit im Workflow erreicht", "final": True})
+                    return
+                yield from self._step(step["tool"], step["args"], outcomes, sources)
+                if outcomes and not outcomes[-1]["ok"]:
+                    return
+            return
         tool = self.reg.get(name)
         if tool is None:
             outcomes.append({"tool": name, "ok": False, "text": f"Unbekanntes Werkzeug: {name}"})
             return
-        args = _coerce(args)
         a = self.reg.assess(self.ctx, name, args)
         if a.level == DENY:
             outcomes.append({"tool": name, "ok": False, "text": f"Verweigert: {a.summary}", "final": True})
@@ -108,6 +149,11 @@ class ToolAgent:
                 return
             pa = self.confirms.create(name, args, a.summary)
             self._pending_ids.add(pa.id)
+            if self.ctx.cancel.is_set():
+                self.confirms.cancel_ids([pa.id])
+                self._pending_ids.discard(pa.id)
+                outcomes.append({"tool": name, "ok": False, "text": "Abgebrochen", "cancelled": True})
+                return
             yield {"type": "confirm", "id": pa.id, "summary": a.summary, "tool": name, "args": pa.args}
             approved = self.confirms.wait(pa)
             self._pending_ids.discard(pa.id)
@@ -147,45 +193,111 @@ class ToolAgent:
         messages = [{"role": "system", "content": self._system(text)},
                     *history[-6:], {"role": "user", "content": text}]
         model = self.cfg.profile.agent_model
+        reasoning = bool(self.cfg.profile.reasoning and wants_reasoning(text, self.cfg.reasoning))
+        if reasoning:
+            model = self.cfg.profile.reasoning
+        yield {"type": "reasoning", "active": reasoning, "model": model}
+        generation_left = self.cfg.reasoning.timeout_s
+        limit = max(1, self.cfg.tools.max_steps)
+        seen: dict[str, int] = {}
         self._final = ""
-        for step in range(max(1, self.cfg.tools.max_steps)):
+        # Ein zusätzlicher Aufruf darf nach dem letzten Werkzeug nur noch zusammenfassen.
+        for _ in range(limit + 1):
             if self.ctx.cancel.is_set():
                 return
+            can_act = len(outcomes) < limit
+            if not can_act:
+                messages.append({"role": "user", "content":
+                                 "Das Werkzeugbudget ist verbraucht. Prüfe anhand der vorhandenen Ergebnisse, "
+                                 "welche Teilziele erreicht und welche offen sind. Keine weiteren Aufrufe."})
+            options = generation_options(self.client, self.cfg, model, reasoning)
+            if options:
+                if generation_left <= 0:
+                    outcomes.append({"tool": "llm", "ok": False, "text": "Zeitlimit der Modellgenerierung erreicht"})
+                    return
+                options["max_time_s"] = generation_left
+                options["cancel"] = self.ctx.cancel
+                if not fit_tool_context(messages, specs if can_act else [], self.cfg.profile.num_ctx,
+                                        options["num_predict"]):
+                    outcomes.append({"tool": "llm", "ok": False,
+                                     "text": "Kontextlimit erreicht; Auftrag aufteilen oder neuen Chat starten"})
+                    return
+            started = time.monotonic()
             try:
-                msg = self.client.chat_once(model, messages, tools=specs, num_ctx=self.cfg.profile.num_ctx,
-                                            keep_alive=self.cfg.keep_alive)
+                msg = self.client.chat_once(model, messages, tools=specs if can_act else None,
+                                            num_ctx=self.cfg.profile.num_ctx,
+                                            keep_alive=self.cfg.keep_alive, **options)
             except OllamaUnavailable:
                 outcomes.append({"tool": "llm", "ok": False, "text": "Das Sprachmodell ist nicht erreichbar"})
                 return
             except ModelMissing as exc:
                 outcomes.append({"tool": "llm", "ok": False, "text": f"Modell fehlt: ollama pull {exc.model}"})
                 return
+            except OllamaError as exc:
+                outcomes.append({"tool": "llm", "ok": False, "text": str(exc)})
+                return
+            generation_left -= time.monotonic() - started
+            if self.ctx.cancel.is_set():
+                return
+            if not isinstance(msg, dict) or not isinstance(msg.get("content", ""), (str, type(None))):
+                outcomes.append({"tool": "llm", "ok": False, "text": "Ungültiges Antwortformat vom Modell"})
+                return
             calls = msg.get("tool_calls") or []
+            if not isinstance(calls, list) or any(
+                    not isinstance(c, dict) or not isinstance(c.get("function"), dict)
+                    or not isinstance(c["function"].get("name"), str) for c in calls):
+                outcomes.append({"tool": "llm", "ok": False, "text": "Ungültiges Werkzeugaufruf-Format vom Modell"})
+                return
             if not calls:
-                calls, text = _text_tool_calls(msg.get("content") or "", allowed)
+                calls, answer = _text_tool_calls(msg.get("content") or "", allowed)
                 if not calls:
-                    self._final = text.strip()
+                    self._final = answer.strip()
+                    if not self._final:
+                        outcomes.append({"tool": "llm", "ok": False,
+                                         "text": "Das Modell hat keine vollständige Antwort geliefert"})
                     return
                 msg = {**msg, "content": "", "tool_calls": calls}
-            messages.append({"role": "assistant", "content": msg.get("content", ""), "tool_calls": calls})
+            # Thinking bleibt im laufenden Tool-Dialog erhalten, niemals in der Sprachausgabe.
+            messages.append({"role": "assistant", "content": msg.get("content", ""), "tool_calls": calls,
+                             **({"thinking": msg["thinking"]} if msg.get("thinking") else {})})
             for call in calls:
+                if len(outcomes) >= limit:
+                    outcomes.append({"tool": "llm", "ok": False,
+                                     "text": "Schrittlimit erreicht; der Auftrag ist möglicherweise unvollständig"})
+                    return
                 fn = call["function"]["name"]
                 raw = call["function"].get("arguments", {})
                 try:
-                    args = raw if isinstance(raw, dict) else json.loads(raw or "{}")
-                except json.JSONDecodeError:
-                    args = {}
+                    args = raw if isinstance(raw, dict) else json.loads(raw or "{}") if raw is None or isinstance(raw, str) else raw
+                except (json.JSONDecodeError, TypeError):
+                    msg_error = "Werkzeugargumente sind kein gültiges JSON"
+                    outcomes.append({"tool": fn, "ok": False, "text": msg_error})
+                    messages.append({"role": "tool", "tool_name": fn, "name": fn, "content": "FEHLER: " + msg_error})
+                    continue
                 if fn not in allowed:
                     outcomes.append({"tool": fn, "ok": False, "text": f"Werkzeug {fn} ist hier nicht verfügbar"})
                     messages.append({"role": "tool", "name": fn, "content": f"FEHLER: {fn} nicht verfügbar"})
                     continue
+                key = f"{fn}:{json.dumps(args, sort_keys=True, ensure_ascii=False)}"
+                seen[key] = seen.get(key, 0) + 1
+                if seen[key] > 2:
+                    outcomes.append({"tool": fn, "ok": False, "final": True,
+                                     "text": "Wiederholungslimit erreicht; identische Aktion nicht erneut ausgeführt"})
+                    return
                 n0 = len(outcomes)
                 yield from self._step(fn, args, outcomes, sources)
                 o = outcomes[-1] if len(outcomes) > n0 else {"ok": False, "text": "Abgebrochen"}
                 messages.append({"role": "tool", "name": fn,
-                                 "content": ("OK: " if o["ok"] else "FEHLER: ") + o["text"]})
+                                 "tool_name": fn,
+                                 "content": ("OK: " if o["ok"] else "FEHLER: ") + (
+                                     "\n".join(f"{v['tool']}: {v['text']}" for v in outcomes[n0:])
+                                     if fn == "workflow_run" else o["text"])})
                 if o.get("declined"):
                     return                         # Nutzer hat abgelehnt: nichts weiter versuchen
+                if not o["ok"] and self.cfg.profile.reasoning and wants_reasoning(
+                        text, self.cfg.reasoning, failed=True) and not reasoning:
+                    reasoning, model = True, self.cfg.profile.reasoning
+                    yield {"type": "reasoning", "active": True, "model": model}
         self._final = self._final or ""
 
     # -------------------------------------------------------- Abschluss
@@ -242,27 +354,35 @@ def _text_tool_calls(content: str, known: set[str]) -> tuple[list[dict], str]:
     """Kleine Modelle liefern Aufrufe manchmal als Text ({"name":…,"arguments":…}, auch in
     <tool_call>-Tags). Gibt (Aufrufe im Ollama-Format, bereinigter Resttext) zurück."""
     calls, rest = [], content or ""
-    candidates = [m.group(1) for m in _TOOL_TAG.finditer(rest)] or [rest]
+    candidates = [m.group(1) for m in _TOOL_TAG.finditer(rest)]
+    if not candidates:
+        candidate = rest.strip()
+        if candidate.endswith("</tool_call>"):
+            candidate = candidate[:-len("</tool_call>")].strip()
+            start = candidate.find("{")
+            prefix = candidate[:start].strip() if start >= 0 else ""
+            if start >= 0 and (not prefix or len(prefix) <= 2 and not prefix.isascii()):
+                candidate = candidate[start:]
+        candidates = [candidate]
     for chunk in candidates:
-        for m in re.finditer(r"\{.*\}", chunk, re.S):
-            try:
-                obj = json.loads(m.group(0))
-            except json.JSONDecodeError:
-                continue
-            if isinstance(obj, dict) and obj.get("name") in known:
-                calls.append({"function": {"name": obj["name"], "arguments": obj.get("arguments") or obj.get("parameters") or {}}})
+        try:
+            obj = json.loads(chunk.strip())
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("name"), str) and obj["name"] in known:
+            calls.append({"function": {"name": obj["name"], "arguments": obj.get("arguments", obj.get("parameters", {}))}})
     if calls:
         rest = ""
     else:
-        rest = _TOOL_TAG.sub("", rest).strip()
+        rest = _TOOL_TAG.sub("", rest).replace("</tool_call>", "").strip()
     return calls, rest
 
 
-def _coerce(args: dict) -> dict:
+def _coerce(args: dict, props: dict) -> dict:
     """Kleine Modelle liefern Listen/Objekte gern als JSON-String — tolerant einlesen."""
     out = {}
     for k, v in (args or {}).items():
-        if isinstance(v, str) and v.strip()[:1] in "[{":
+        if props.get(k, {}).get("type") in ("array", "object") and isinstance(v, str) and v.strip()[:1] in "[{":
             try:
                 v = json.loads(v)
             except json.JSONDecodeError:

@@ -215,6 +215,9 @@ class BrowserController:
     def snapshot(self) -> str:
         return self._call("take_snapshot", {})
 
+    def browser_snapshot(self) -> str:
+        return self.snapshot()
+
     def click(self, uid: str) -> str:
         return self._call("click", {"uid": uid})
 

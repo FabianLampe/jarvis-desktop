@@ -6,6 +6,7 @@ den ausdrücklich getrennten run_shell-Pfad (Adapter.shell_argv).
 from __future__ import annotations
 
 import itertools
+import math
 import logging
 import os
 import re
@@ -147,6 +148,8 @@ class ProcessRunner:
     def _start(self, argv: list[str], cwd: Path, env: Optional[dict],
                timeout_s: float, max_chars: int) -> Job | RunResult:
         t0 = time.monotonic()
+        if not math.isfinite(timeout_s) or timeout_s <= 0:
+            return RunResult(False, None, "", "", 0.0, cwd=str(cwd), error="Zeitlimit muss endlich und größer als 0 sein")
         try:
             proc = subprocess.Popen(
                 argv, cwd=str(cwd), env=clean_env(env), shell=False,

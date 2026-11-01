@@ -4,7 +4,7 @@ from __future__ import annotations
 from .registry import ALLOW, CONFIRM, Assessment, Tool, ToolContext, ToolError, ToolResult, wrap_untrusted
 from .schemas import TOOLS
 
-_UNTRUSTED = {"read_page", "list_tabs"}
+_UNTRUSTED = {"read_page", "list_tabs", "browser_snapshot"}
 
 
 def _controller(ctx: ToolContext):

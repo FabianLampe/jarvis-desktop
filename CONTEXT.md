@@ -152,6 +152,24 @@ Blind-Modellvergleich · persistenter Memory/Skills-Store · 2FA · PWA-Mobile.
 
 ## Status
 
+**Update 2026-10-30 (Bugprüfung):** JSON-/Textschreiben, Schema-Prüfung, gemischte Aufträge,
+Browser-Routing, Chat-/Task-Abbruch und Neuer-Chat-Rennen, Sprachfüller, GitHub-Antworten und
+Mac-UI-Zeitlimits korrigiert. `pedalboard` als fehlende Sprach-Abhängigkeit ergänzt.
+63 neue Regressionstests; 362 lokal ausführbare Tests bestanden. Einzelheiten:
+[Bugprüfung](docs/bug-review-2026-10-30.md).
+
+**Update 2026-10-30 (Werkzeuge):** 82 registrierte Funktionen, einschließlich Browser-Snapshot,
+Git/GitHub, strukturierten Tests/Dateiprüfungen, SSH/Pi-Diagnose, Datenanalyse/Diagrammen,
+PDF/Word/Excel-Ausgabe, optionaler Mac-AX-Steuerung, gespeicherten Workflows und allgemeinem
+stdio-MCP-Adapter. Einrichtung und Grenzen: [Werkzeug-Erweiterungen](docs/werkzeug-erweiterungen.md).
+Neue Remote-/Mac-Adapter benötigen eigene Konfiguration; Workflows bleiben im normalen Policy-/Abbruchpfad.
+
+**Update 2026-10-30:** [ADR 0005](docs/adr/0005-automatic-reasoning.md) erweitert die frühere
+„Schwerlast nur auf Ansage“-Regel für Profile mit `reasoning:`. Im Mac-Profil darf Jarvis
+`qwen3.6:35b` nun automatisch für komplexe Aufgaben / nach Werkzeugfehlern wählen.
+`reasoning.mode: auto|on|off` steuert dies; Home/Dev bleiben bei ihrer bisherigen Modellauswahl.
+Ollama-Thinking, begrenzte Generierung und interner Thinking-Kontext in Tool-Aufträgen sind angebunden.
+
 **Alle Grundsatzfragen geklärt** (Modell-Strategie, Schwerlast-Spur, Fork/nativ, Sprache,
 Router-Steuerung, Feature-Umfang, Persona, GUI). Architektur in ADR 0001–0003 + obigen Entscheidungen.
 
