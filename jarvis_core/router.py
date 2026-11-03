@@ -65,7 +65,8 @@ class RouteDecision:
 _REASONING = re.compile(
     r"\b(analys\w*|vergleich\w*|vergleiche|abwäg\w*|abwaeg\w*|begründe\w*|begruende\w*|"
     r"plane|planen|planung|strategie\w*|optimier\w*|debug\w*|fehlersuche|fehler\w*|"
-    r"warum|weshalb|ursache\w*|beweis\w*|herleit\w*|berechn\w*|rechnung|"
+    r"fehl|abst[üu]rz\w*|stürzt|crash\w*|funktioniert nicht|"
+    r"ursache\w*|beweis\w*|herleit\w*|berechn\w*|rechnung|"
     r"reasoning|nachdenken|durchdenken|schrittweise|mehrstufig\w*|"
     r"analy[sz]e|compare|plan|debug|reason|prove)\b|"
     r"\b(schritt für schritt|step by step|denke nach|denk nach)\b", re.I)
@@ -74,14 +75,40 @@ _ACTION = re.compile(r"\b(erstell\w*|lege|lies|lese|prüf\w*|schreib\w*|öffne|s
                      r"installier\w*|führ\w*)\b", re.I)
 
 
+# Benchmark 2026-11-03 (scripts/model_bench.py): Ohne Thinking scheiterten die Modelle an
+# Rechnungen, Datums-/Zeitzonenfragen und Logikrätseln, oft ohne klassisches Signalwort.
+# Befehle mit Zahlen („Lautstärke auf 30 Prozent“, „in 20 Minuten“) bleiben bewusst schnell.
+_HARD = re.compile(
+    r"\b(brutto|netto|mwst|mehrwertsteuer|zinsen|zinseszins|rabatt|skonto)\b"
+    r"|\d\s*[+*×÷^]\s*\d"
+    r"|\d\s+(mal|plus|minus|hoch|geteilt durch)\s+\d"
+    r"|\bwochentag\b|\bwelch\w*\s+datum\b"
+    r"|\bwie viele\s+(tage|wochen|monate|stunden)\b|\btage\s+(bis|zwischen)\b"
+    r"|\bwie (spät|viel uhr) ist es\s+in\b|\buhrzeit\s+in\b|\bzeit(verschiebung|unterschied|zone)\w*"
+    r"|\b(logik)?rätsel\w*|\bwer\s+(hat|von\s+\w+)\s+welch\w*", re.I)
+_CALC = re.compile(r"\b(wie viel|wieviel|kostet|kosten|summe|insgesamt|durchschnitt\w*|"
+                   r"prozent\s+von|%\s+von)\b", re.I)
+_WHY = re.compile(r"\b(warum|weshalb|wieso)\b", re.I)
+_WHY_MIN_WORDS = 10   # kurze Warum-Fragen sind Wissensfragen, die das Hauptmodell sofort kann
+
+
+def needs_reasoning_task(text: str) -> bool:
+    """Aufgabe ist schwer, auch wenn kein klassisches Denk-Signalwort vorkommt."""
+    return bool(_HARD.search(text) or (_CALC.search(text) and re.search(r"\d", text)))
+
+
 def wants_reasoning(text: str, settings: ReasoningConfig, *, failed: bool = False) -> bool:
     """Nachvollziehbare lokale Heuristik, kein zusätzlicher Klassifikator-Aufruf."""
     if settings.mode == "off":
         return False
-    return (settings.mode == "on" or failed or bool(_REASONING.search(text))
-            or looks_like_code(text)
-            or len(_ACTION.findall(text)) >= 2
-            or bool(re.search(r"\b(zuerst|anschließend|anschliessend|danach)\b", text, re.I)))
+    if settings.mode == "on" or failed:
+        return True
+    signal = _REASONING.search(_WHY.sub(" ", text))
+    long_why = bool(_WHY.search(text)) and len(text.split()) >= _WHY_MIN_WORDS
+    return bool(signal or long_why or needs_reasoning_task(text)
+                or looks_like_code(text)
+                or len(_ACTION.findall(text)) >= 2
+                or re.search(r"\b(zuerst|anschließend|anschliessend|danach)\b", text, re.I))
 
 
 def wants_heavy(text: str) -> bool:

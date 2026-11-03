@@ -35,6 +35,44 @@ def test_simple_requests_stay_fast(text):
     assert route(text, False, PROFILE, ReasoningConfig()).model == "fast"
 
 
+# Benchmark 2026-11-03: Ohne Thinking scheiterten die Modelle an Rechnungen, Datums-
+# und Zeitzonenfragen sowie Logikrätseln — auch ohne klassisches Signalwort.
+@pytest.mark.parametrize("text", [
+    "Was kostet das brutto?",
+    "Wie viel sind 17,5 % von 2340 €?",
+    "Was ist 37 * 48?",
+    "Welcher Wochentag ist in 45 Tagen?",
+    "Welches Datum ist in 3 Wochen?",
+    "Wie viele Tage sind es bis Weihnachten?",
+    "Wie spät ist es in Tokio, wenn es bei uns 22 Uhr ist?",
+    "Wie groß ist die Zeitverschiebung nach New York?",
+    "Wer hat welches Haustier, wenn Ben allergisch ist?",
+    "Kannst du dieses Rätsel lösen?",
+    "Warum fällt mein WLAN jeden Abend gegen 22 Uhr aus, obwohl der Router neu ist?",
+    "Warum schlägt mein Build fehl?",
+    "Wieso stürzt die App ab?",
+    "Wie viel Uhr ist es in London?",
+    "Was ist 2 hoch 20?",
+])
+def test_hard_questions_without_signal_words_use_reasoner(text):
+    assert route(text, False, PROFILE, ReasoningConfig()).lane == "reasoning"
+
+
+@pytest.mark.parametrize("text", [
+    "Warum ist der Himmel blau?",
+    "Weshalb gähnen wir?",
+    "Wie spät ist es?",
+    "Stell die Lautstärke auf 30 Prozent",
+    "Erinnere mich in 20 Minuten an den Tee",
+    "Erinnere mich in 3 Tagen an die Steuer",
+    "Trag mir morgen von 18-20 Uhr Training ein",
+    "Wie viele Termine habe ich morgen?",
+    "Spiel Musik und dann mach leiser",
+])
+def test_short_knowledge_and_commands_stay_fast(text):
+    assert route(text, False, PROFILE, ReasoningConfig()).model == "fast"
+
+
 def test_on_off_and_explicit_heavy():
     assert route("Hallo", False, PROFILE, ReasoningConfig("on")).reasoning
     assert not route("Analysiere das", False, PROFILE, ReasoningConfig("off")).reasoning
