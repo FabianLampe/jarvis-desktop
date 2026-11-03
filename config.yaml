@@ -35,7 +35,7 @@ ollama:
 # Automatisches Reasoning; benötigt profiles.<profil>.reasoning.
 reasoning:
   mode: "auto"           # auto = nach Aufgabe / Werkzeugfehler; on = immer; off = keine automatische Eskalation
-  max_tokens: 2048        # Thinking + Antwort je Aufruf (kein reines Denkbudget)
+  max_tokens: 4096        # Thinking + Antwort je Aufruf (kein reines Denkbudget); 2048 schnitt Antworten ab
   timeout_s: 120          # Generierungsbudget; Befehle haben ihre separaten Werkzeug-Zeitlimits
 
 voice_ws:                  # Schnittstelle App ↔ Sprach-Daemon
@@ -119,13 +119,16 @@ profiles:
     num_ctx: 2048
   mac:
     # Apple Silicon (M5 Pro, 48 GB Unified Memory) — gemessen 2026-10-28, siehe README.
-    # Ein mittleres Modell bleibt resident; Werkzeugaufrufe laufen über `agent`.
-    general: "qwen2.5:14b"
-    coder: "qwen2.5:14b"
-    agent: "qwen2.5:14b"    # Modell mit zuverlässigem Tool-Calling
+    # Benchmark 2026-11-03 (scripts/model_bench.py, 16 Jarvis-Aufgaben):
+    #   gemma4:26b ohne Thinking 94,8 % bei ~1,8 s → bleibt resident für Chat und Werkzeuge.
+    #   qwen3.8:27b mit Thinking 97,5 % bei ~16 s, denkt am knappsten → Reasoning/Schwerlast
+    #   (wird bei Bedarf eingewechselt, ~2 s Ladezeit; gemma4 danach zurückgeladen).
+    general: "gemma4:26b"
+    coder: "gemma4:26b"
+    agent: "gemma4:26b"     # Modell mit zuverlässigem Tool-Calling
     quick: "qwen2.5:7b"     # Schnellspur: beantwortet Zwischenfragen, solange eine Aufgabe das große Modell belegt
-    heavy: "qwen3.6:35b"    # manuell wählbare Schwerlast; dasselbe Modell dient auch als automatischer Reasoner
-    reasoning: "qwen3.6:35b" # automatisch bei komplexen Aufgaben, sonst bleiben die schnellen Modelle aktiv
+    heavy: "qwen3.8:27b"    # manuell wählbare Schwerlast
+    reasoning: "qwen3.8:27b" # automatisch bei komplexen Aufgaben, mit Thinking
     gpu_monitor: false      # kein nvidia-smi; RAM-Anzeige deckt Unified Memory ab
     num_ctx: 8192
 
