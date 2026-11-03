@@ -311,7 +311,8 @@ def test_tool_generation_budget_is_shared_across_calls(tmp_path, monkeypatch):
     rt = runtime(tmp_path, {"tool_calls": [call("make_dir", path="one")]},
                  {"tool_calls": [call("make_dir", path="two")]},
                  {"tool_calls": [call("make_dir", path="three")]})
-    clock = iter([0, 65, 65, 130])
+    limit = rt.agent.cfg.reasoning.timeout_s   # unabhängig vom Wert in config.yaml
+    clock = iter([0, limit - 55, limit - 55, limit + 10])
     monkeypatch.setattr("jarvis_core.toolagent.time", SimpleNamespace(monotonic=lambda: next(clock)))
     ev = run(rt, "Erstelle einen Ordner")
     assert len(rt.agent.client.calls) == 2

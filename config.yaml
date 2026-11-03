@@ -35,8 +35,9 @@ ollama:
 # Automatisches Reasoning; benötigt profiles.<profil>.reasoning.
 reasoning:
   mode: "auto"           # auto = nach Aufgabe / Werkzeugfehler; on = immer; off = keine automatische Eskalation
-  max_tokens: 4096        # Thinking + Antwort je Aufruf (kein reines Denkbudget); 2048 schnitt Antworten ab
-  timeout_s: 120          # Generierungsbudget; Befehle haben ihre separaten Werkzeug-Zeitlimits
+  max_tokens: 8192        # Thinking + Antwort je Aufruf; effektiv min(max_tokens, num_ctx/3).
+                          # Code-Benchmark: qwen3.8 mit Thinking braucht bei schweren Aufgaben bis ~6900 Tokens
+  timeout_s: 240          # Generierungsbudget (Benchmark: bis ~170 s); Befehle haben eigene Werkzeug-Zeitlimits
 
 voice_ws:                  # Schnittstelle App ↔ Sprach-Daemon
   host: "127.0.0.1"
@@ -130,7 +131,7 @@ profiles:
     heavy: "qwen3.8:27b"    # manuell wählbare Schwerlast
     reasoning: "qwen3.8:27b" # automatisch bei komplexen Aufgaben, mit Thinking
     gpu_monitor: false      # kein nvidia-smi; RAM-Anzeige deckt Unified Memory ab
-    num_ctx: 8192
+    num_ctx: 24576          # ≥ 3 × reasoning.max_tokens, sonst wird die Antwort auf num_ctx/3 gekappt
 
 # Werkzeugsteuerung (Terminal, Dateien, Gedächtnis, Dokumente, Erinnerungen)
 tools:
