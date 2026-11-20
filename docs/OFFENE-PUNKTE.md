@@ -72,6 +72,8 @@ Stand: 2026-11-20
 - Apple Kurzbefehle, in Mac-Apps tippen, Programmier-Projekte (venv, Pakete, Commit, Push)
 - Apple Music, Bildgenerierung (vorbereitet, aus), Kamera beobachten (Bewegung)
 - Wetter-Rat, Vorlieben selbst merken, Spotlight-Suche, Systemaktionen, Apple Notizen, Einheiten, Timer
+- Sicherheit: Daten können nicht mehr per DNS (dig/ping/nslookup mit präpariertem Hostnamen) hinausgeschmuggelt
+  werden – nach fremden/persönlichen Inhalten fragt Jarvis bei Hostnamen nach; reine IP-Diagnose bleibt frei
 
 ### 2026-11-10
 - Werkzeugauswahl durch das Modell, Schrittlimit 12

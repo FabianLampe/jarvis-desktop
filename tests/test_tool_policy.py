@@ -84,8 +84,10 @@ def test_network_queries_run_without_confirmation_even_after_foreign_output(tmp_
     for argv in (["ifconfig"], ["ifconfig", "en0"], ["networksetup", "-getinfo", "Wi-Fi"],
                  ["networksetup", "-listallhardwareports"], ["ipconfig", "getsummary", "en0"],
                  ["scutil", "--dns"], ["netstat", "-rn"], ["route", "-n", "get", "default"],
-                 ["arp", "-a"], ["ping", "-c", "4", "1.1.1.1"], ["dig", "example.org"]):
+                 ["arp", "-a"], ["ping", "-c", "4", "1.1.1.1"], ["dig", "-x", "8.8.8.8"]):
         assert assess(rt, "run_command", argv=argv).level == ALLOW, argv
+    # Hostnamen sind ein Kanal nach außen (DNS): nach fremdem Inhalt entscheidet Sir.
+    assert assess(rt, "run_command", argv=["dig", "example.org"]).level == CONFIRM
 
 
 def test_network_changes_still_need_confirmation(tmp_path):

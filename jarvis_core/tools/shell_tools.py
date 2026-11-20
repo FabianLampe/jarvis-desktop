@@ -124,6 +124,24 @@ def _unwrap(argv: list[str]) -> list[str]:
 _IFACE = re.compile(r"^[a-z]+\d*$")
 
 
+# Befehle, die einen (vom Modell gewählten) Namen im Netz auflösen oder ansprechen.
+NAME_LOOKUP = {"dig", "host", "nslookup", "ping", "ping6", "traceroute", "traceroute6", "whois", "nc", "curl", "wget"}
+
+
+def _only_ip_targets(args: list[str]) -> bool:
+    """Nur IP-Adressen als Ziel (z. B. ping -c 4 1.1.1.1): darin lässt sich nichts hinausschmuggeln."""
+    import ipaddress
+    targets = [a for a in args if not a.startswith("-") and not a.isdigit()]
+    if not targets:
+        return False
+    for t in targets:
+        try:
+            ipaddress.ip_address(t.lstrip("@"))
+        except ValueError:
+            return False
+    return True
+
+
 def network_reader(name: str, args: list[str]) -> bool:
     """Rein lesende Netzwerkabfragen (macOS). Einstellen braucht andere Unterbefehle bzw. Root
     und bleibt bestätigungspflichtig: networksetup -set…, ifconfig en0 down, route add …"""
@@ -183,6 +201,13 @@ def classify_argv(ctx: ToolContext, argv: list[str], cwd: Path, env: Optional[di
     if inner is not argv and Path(inner[0]).name.lower() == "sudo":
         return Assessment(CONFIRM, f"ADMINISTRATOR-BEFEHL: {shown}")
     name = _norm_name(inner[0])
+    if name in NAME_LOOKUP and any(a.startswith("-f") or a == "-k" for a in inner[1:]):
+        # dig -f DATEI / -k SCHLÜSSEL: jede Zeile einer Datei würde als DNS-Anfrage hinausgehen.
+        return Assessment(CONFIRM, f"Netzwerkabfrage mit Dateieingabe: {shown}")
+    if name in NAME_LOOKUP and (ctx.tainted or ctx.private) and not _only_ip_targets(inner[1:]):
+        # Ein Hostname ist ein Kanal nach außen (geheimnis.angreifer.example). Nach fremdem oder
+        # persönlichem Inhalt entscheidet Sir — auch bei sonst harmlosen Abfragen wie ping oder dig.
+        return Assessment(CONFIRM, f"Netzwerkabfrage nach Lesen fremder/persönlicher Inhalte: {shown}")
     if inner is argv and network_reader(name, inner[1:]) and not _outside_paths(ctx, inner, cwd):
         return Assessment(ALLOW)
     if name in DANGEROUS or name.startswith("mkfs"):
