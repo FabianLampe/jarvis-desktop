@@ -128,18 +128,33 @@ _IFACE = re.compile(r"^[a-z]+\d*$")
 NAME_LOOKUP = {"dig", "host", "nslookup", "ping", "ping6", "traceroute", "traceroute6", "whois", "nc", "curl", "wget"}
 
 
-def _only_ip_targets(args: list[str]) -> bool:
-    """Nur IP-Adressen als Ziel (z. B. ping -c 4 1.1.1.1): darin lässt sich nichts hinausschmuggeln."""
+# Ziele, die nach fremdem/persönlichem Inhalt ohne Rückfrage angesprochen werden dürfen:
+# das eigene Netz und bekannte öffentliche Resolver. Eine beliebige öffentliche IP könnte dem Angreifer gehören.
+_KNOWN_PUBLIC = {"1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4", "9.9.9.9", "149.112.112.112"}
+
+
+def _harmless_target(t: str) -> bool:
     import ipaddress
-    targets = [a for a in args if not a.startswith("-") and not a.isdigit()]
-    if not targets:
+    try:
+        ip = ipaddress.ip_address(t)
+    except ValueError:
         return False
-    for t in targets:
-        try:
-            ipaddress.ip_address(t.lstrip("@"))
-        except ValueError:
-            return False
-    return True
+    return t in _KNOWN_PUBLIC or ip.is_private or ip.is_loopback or ip.is_link_local
+
+
+def _fixed_diagnostic(name: str, args: list[str]) -> bool:
+    """Nur exakt diese Formen gelten nach fremdem/persönlichem Inhalt als harmlos — ohne weitere Optionen,
+    in denen sich Daten verstecken ließen (ping -p MUSTER, dig -qNAME, @server, +Optionen …):
+      ping [-c N] ZIEL · dig -x ZIEL · host ZIEL · nslookup ZIEL · traceroute ZIEL   (ZIEL siehe _harmless_target)"""
+    if name in ("ping", "ping6"):
+        if len(args) == 3 and args[0] == "-c" and args[1].isdigit() and 1 <= int(args[1]) <= 10:
+            return _harmless_target(args[2])
+        return len(args) == 1 and _harmless_target(args[0])
+    if name == "dig":
+        return len(args) == 2 and args[0] == "-x" and _harmless_target(args[1])
+    if name in ("host", "nslookup", "traceroute", "traceroute6"):
+        return len(args) == 1 and _harmless_target(args[0])
+    return False
 
 
 def network_reader(name: str, args: list[str]) -> bool:
@@ -204,9 +219,9 @@ def classify_argv(ctx: ToolContext, argv: list[str], cwd: Path, env: Optional[di
     if name in NAME_LOOKUP and any(a.startswith("-f") or a == "-k" for a in inner[1:]):
         # dig -f DATEI / -k SCHLÜSSEL: jede Zeile einer Datei würde als DNS-Anfrage hinausgehen.
         return Assessment(CONFIRM, f"Netzwerkabfrage mit Dateieingabe: {shown}")
-    if name in NAME_LOOKUP and (ctx.tainted or ctx.private) and not _only_ip_targets(inner[1:]):
-        # Ein Hostname ist ein Kanal nach außen (geheimnis.angreifer.example). Nach fremdem oder
-        # persönlichem Inhalt entscheidet Sir — auch bei sonst harmlosen Abfragen wie ping oder dig.
+    if name in NAME_LOOKUP and (ctx.tainted or ctx.private) and not _fixed_diagnostic(name, inner[1:]):
+        # Hostnamen, Optionen und fremde Ziel-IPs sind Kanäle nach außen (geheimnis.angreifer.example,
+        # ping -p MUSTER, @server). Nach fremdem oder persönlichem Inhalt entscheidet Sir.
         return Assessment(CONFIRM, f"Netzwerkabfrage nach Lesen fremder/persönlicher Inhalte: {shown}")
     if inner is argv and network_reader(name, inner[1:]) and not _outside_paths(ctx, inner, cwd):
         return Assessment(ALLOW)
