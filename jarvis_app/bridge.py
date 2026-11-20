@@ -56,6 +56,21 @@ def _zone(orb_px: int) -> int:
     return int(orb_px * ZONE_FACTOR)
 
 
+# Antwort auf eine gesprochene Bestätigungsfrage („Soll ich das machen, Sir? Ja oder nein.“)
+_CONFIRM_YES = _re.compile(r"^(?:ja|jawohl|jep|jo|genau|richtig|korrekt|passt|okay|ok|einverstanden|"
+                           r"bestätig\w*|mach(?:\s+(?:das|es))?|tu\s+(?:das|es)|ausführen|los)\b", _re.I)
+_CONFIRM_NO = _re.compile(r"^(?:nein|nee|nö|ne|nicht|stopp?|halt|abbrechen|abbruch|lieber nicht|falsch|"
+                          r"ablehnen|auf keinen fall)\b", _re.I)
+
+
+def voice_decision(text: str) -> Optional[bool]:
+    """True/False für ein gesprochenes Ja/Nein, None für alles andere („Jarvis“ davor ist erlaubt)."""
+    t = _re.sub(r"^\W*(?:hey\s+)?jarvis\W*", "", text.strip(), flags=_re.I)
+    if _CONFIRM_NO.match(t):                          # „nein, nicht so“ ist nie ein Ja
+        return False
+    return True if _CONFIRM_YES.match(t) else None
+
+
 _AFFIRM = _re.compile(r"^(?:ja|jawohl|jep|okay|ok|gerne|gern|genau|los|bitte|na klar|klar|sehr gerne|"
                       r"(?:ja[, ]*)?(?:bitte[, ]*)?(?:mach|tu|erledige|hol|führ)\w*\s*(?:das|es|sie|ihn|dies)?"
                       r"(?:\s*(?:bitte|mal|gerne|aus|ein|raus|durch))?)[\s,.!]*(?:bitte|gerne|mal)?[\s.!]*$", _re.I)
@@ -122,6 +137,7 @@ class Bridge:
         self._orb_px = int(cfg.orb.get("size_px", 170))
         self._heavy_active = False
         self._last_model: Optional[str] = None
+        self._voice_confirm: Optional[str] = None   # Bestätigung, die per Stimme beantwortet werden darf
         self._last_tps: Optional[float] = None
         self._online: Optional[bool] = None
         self._seq = 0
@@ -135,6 +151,7 @@ class Bridge:
         self._briefing: Optional[BriefingService] = None
         self._reminders: Optional[ReminderService] = None
         self._telegram = None
+        self._watcher = None
         self._muted = False
         self._tasks: Optional[TaskManager] = None
         from jarvis_core.fillers import FillerSource
@@ -158,6 +175,8 @@ class Bridge:
         with self._runtime_lock:
             if self._rt is None:
                 self._rt = build_runtime(self._cfg, self._client, interactive=True)
+                # Meldungen von Hintergrundwerkzeugen (Kamerabeobachtung) laufen denselben Weg wie die Wächter-Meldungen.
+                self._rt.ctx.shared["notify"] = self._on_watcher_notice
             return self._rt
 
     def _task_manager(self) -> TaskManager:
@@ -255,6 +274,31 @@ class Bridge:
         if self._hub.connected and not self._experience.sleeping:
             self._hub.say(text)
 
+    def _auto_learn(self, text: str) -> None:
+        try:
+            for note in self._runtime().learn(text):
+                log.info("Auto-Learn: %s", note)
+                self._js("jarvis.onNotice", note)
+        except Exception:  # noqa: BLE001 — Merken darf nie den Auftrag stören
+            log.debug("Auto-Learn fehlgeschlagen", exc_info=True)
+
+    def _start_watcher(self) -> None:
+        """Wächter (neues Gerät, Termin in Kürze, Platte, Akku) — meldet wie eine Erinnerung."""
+        if not self._cfg.proactive.enabled:
+            return
+        from jarvis_core.proactive import Watcher
+        self._watcher = Watcher(self._runtime().ctx, self._on_watcher_notice)
+        self._watcher.start()
+        log.info("Wächter aktiv (alle %d min)", self._cfg.proactive.interval_min)
+
+    def _on_watcher_notice(self, text: str) -> None:
+        if self._experience.running:
+            return                                   # Startsequenz nicht unterbrechen
+        self._platform.notify("Jarvis", text)
+        self._js("jarvis.onNotice", text)
+        if self._hub.connected and not self._experience.sleeping:
+            self._hub.say(text)
+
     def _start_telegram(self) -> None:
         from jarvis_core.integrations.services import Telegram, TelegramBot
         tg = Telegram(self._cfg.integrations.get("telegram"))
@@ -299,7 +343,7 @@ class Bridge:
         # The UI-ready handshake starts the visible startup checks/model warmup.
         threading.Thread(target=self._task_monitor, name="jarvis-taskmon", daemon=True).start()
         if self._cfg.tools.enabled:
-            for fn in (self._start_reminders, self._start_telegram):
+            for fn in (self._start_reminders, self._start_telegram, self._start_watcher):
                 threading.Thread(target=self._safe, args=(fn,), name=f"jarvis-{fn.__name__}", daemon=True).start()
 
     def _safe(self, fn) -> None:
@@ -319,7 +363,7 @@ class Bridge:
             log.info("Allrounder-Modell vorgewärmt: %s", self._cfg.profile.general)
             q = self._cfg.profile.quick
             if q:                                    # Schnellspur bereithalten, damit Zwischenfragen sofort drankommen
-                self._client.preload(q, self._cfg.keep_alive)
+                self._client.preload(q, self._cfg.keep_alive, self._cfg.profile.num_ctx)
                 log.info("Schnellspur-Modell vorgewärmt: %s", q)
         except Exception as exc:
             log.debug("Warmup übersprungen: %s", exc)
@@ -337,7 +381,12 @@ class Bridge:
             self._reminders.shutdown()
         if self._telegram is not None:
             self._telegram.stop()
+        if self._watcher is not None:
+            self._watcher.stop()
         if self._rt is not None:
+            cam = self._rt.ctx.shared.get("camera_watch")
+            if cam is not None:
+                cam.stop()                          # Kamera nie laufen lassen, wenn Jarvis endet
             self._rt.agent.cancel()
 
     def _ensure_browser_agent(self) -> BrowserAgent:
@@ -355,6 +404,43 @@ class Bridge:
 
     def request_experience(self, mode: str) -> dict[str, Any]:
         return self._experience.start(mode)
+
+    IMAGE_MAX_BYTES = 15_000_000
+    _IMAGE_MAGIC = ((b"\x89PNG\r\n\x1a\n", "png"), (b"\xff\xd8\xff", "jpg"), (b"GIF8", "gif"), (b"BM", "bmp"))
+
+    def attach_image(self, data_url: str, name: str = "") -> dict[str, Any]:
+        """Bild aus dem Chat (Einfügen, Hineinziehen, Auswahl) im Arbeitsordner unter „Bilder“ ablegen.
+        Gespeichert wird nur, was nach den ersten Bytes tatsächlich ein Bild ist."""
+        import base64
+        import binascii
+        head, _, payload = str(data_url or "").partition(",")
+        if not head.startswith("data:image/") or ";base64" not in head:
+            return {"ok": False, "error": "Das ist kein Bild."}
+        if len(payload) > self.IMAGE_MAX_BYTES * 4 // 3 + 16:
+            return {"ok": False, "error": "Das Bild ist größer als 15 MB."}
+        try:
+            raw = base64.b64decode(payload, validate=True)
+        except (binascii.Error, ValueError):
+            return {"ok": False, "error": "Das Bild ließ sich nicht lesen."}
+        ext = next((e for magic, e in self._IMAGE_MAGIC if raw.startswith(magic)), None)
+        if ext is None and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+            ext = "webp"
+        if ext is None and raw[4:12] in (b"ftypheic", b"ftypheix", b"ftypmif1", b"ftypavif"):
+            ext = "heic" if b"heic" in raw[4:12] or b"heix" in raw[4:12] or b"mif1" in raw[4:12] else "avif"
+        if ext is None:
+            return {"ok": False, "error": "Unbekanntes Bildformat."}
+        ws = self._runtime().ctx.workspace
+        folder = ws / "Bilder"
+        folder.mkdir(parents=True, exist_ok=True)
+        stem = time.strftime("eingang-%Y%m%d-%H%M%S")
+        target = folder / f"{stem}.{ext}"
+        n = 1
+        while target.exists():
+            n += 1
+            target = folder / f"{stem}-{n}.{ext}"
+        target.write_bytes(raw)
+        log.info("Bild angehängt: %s (%d KB)", target, len(raw) // 1024)
+        return {"ok": True, "path": str(target), "rel": str(target.relative_to(ws))}
 
     def choose_music(self) -> dict[str, Any]:
         return self._experience.select_music()
@@ -412,6 +498,8 @@ class Bridge:
                 self._tasks.cancel()
             self._hub.stop_speaking()
             self._chat.reset()
+            if self._rt is not None:            # leerer Verlauf ⇒ Fremdinhalt wirkt nicht mehr nach
+                self._rt.ctx.services.pop("conversation_taint", None)
         self._last_tps = None
         self._push_status()
         return {"ok": True, "context": self._chat.context_info()}
@@ -434,6 +522,8 @@ class Bridge:
 
     def confirm_action(self, action_id: str, approve: bool) -> dict[str, Any]:
         """Zustimmung/Ablehnung für genau eine angezeigte Aktion."""
+        if self._voice_confirm == str(action_id):
+            self._voice_confirm = None                # im Panel entschieden ⇒ kein späteres „Ja“ mehr
         return {"ok": self._runtime().confirms.resolve(str(action_id), bool(approve))}
 
     def cancel(self, cancel_experience: bool = True) -> dict[str, Any]:
@@ -510,6 +600,7 @@ class Bridge:
         if self._experience.running:
             self._reply_plain(sid, "Die Startsequenz läuft noch, Sir. Sie können sie jederzeit abbrechen.", False)
             return
+        self._auto_learn(text)                         # „Ich heiße …“, „Ich mag …“ → Fakt merken (nur Nutzertext)
         generation = self._chat_generation
         # Reihenfolge: Werkzeug-Schnellpfad (App öffnen, „merk dir“) → Browser-Schnellpfad →
         # Werkzeug-Agent (mehrstufig, LLM) → normaler Chat.
@@ -555,7 +646,7 @@ class Bridge:
         if self._cfg.browser.enabled and browser_intent.detect_all(text):
             self._run_browser_stream(sid, text, speak_back, voice_origin)
             return
-        if tools_on and self._runtime().agent.wants_tools(text):
+        if tools_on and self._runtime().agent.wants_tools(text, self._quick_model()):
             self._run_tool_stream(sid, text, speak_back, voice_origin, generation)
             return
 
@@ -727,6 +818,7 @@ class Bridge:
             task = tm.begin(text, voice=voice_origin)
         parallel = len(tm.active()) > 1
         final = ""
+        asked: Optional[str] = None                  # per Stimme gestellte, noch offene Rückfrage
         answered = threading.Event()
         if voice_origin and speak_back:
             self._start_filler(text, answered)
@@ -737,6 +829,9 @@ class Bridge:
                     return
                 kind = ev.get("type")
                 if kind == "reasoning":
+                    if ev.get("model"):                 # Statusleiste zeigt das Modell, das wirklich arbeitet
+                        self._last_model = ev["model"]
+                        self._push_status()
                     if ev.get("active"):
                         tm.update(task, current="denkt nach und prüft den Auftrag", status="running")
                         if not voice_origin:
@@ -752,8 +847,14 @@ class Bridge:
                     tm.update(task, current="wartet auf Ihre Bestätigung", status="confirm")
                     self._js("jarvis.onConfirm", ev)
                     if voice_origin:
-                        self._hub.say("Das braucht Ihre Bestätigung im Panel, Sir: " + ev["summary"][:200])
+                        # Das Gesprächsfenster des Daemons hört danach zu: „Ja“/„Nein“ entscheidet.
+                        self._voice_confirm = asked = ev["id"]
+                        answered.set()                    # keine Füllsätze, während Sir antworten soll
+                        self._hub.say(ev["summary"][:200].rstrip(". ") + ". Soll ich das machen, Sir? Ja oder nein.")
                 elif kind == "result":
+                    if asked is not None and self._voice_confirm == asked:
+                        self._voice_confirm = None       # entschieden oder verfallen: kein spätes „Ja“ mehr
+                    asked = None
                     tm.update(task, current=f"{ev['tool']}: {'fertig' if ev['ok'] else 'Fehler'}", status="running")
                     if not voice_origin:
                         self._js("jarvis.onAction", sid, f"{ev['tool']}: {ev['text'][:160]}".replace("\n", " "), bool(ev["ok"]))
@@ -846,7 +947,23 @@ class Bridge:
         voice_origin=True ⇒ die Antwort erscheint im Panel synchron zur Stimme."""
         log.info("Sprachbefehl: %s", text)
         self._js("jarvis.onUserMessage", text)
+        if self._answer_voice_confirm(text):
+            return
         self.send_message(text, force_7b=False, speak_back=True, voice_origin=True)
+
+    def _answer_voice_confirm(self, text: str) -> bool:
+        """Offene Bestätigung + gesprochenes Ja/Nein ⇒ entscheiden statt neuen Auftrag starten."""
+        action_id = self._voice_confirm
+        decision = voice_decision(text) if action_id else None
+        if decision is None:
+            return False
+        self._voice_confirm = None
+        if not self._runtime().confirms.resolve(action_id, decision):
+            self._hub.say("Diese Rückfrage ist schon abgelaufen, Sir. Sagen Sie den Auftrag bitte noch einmal.")
+            return True
+        log.info("Bestätigung per Stimme: %s", "ja" if decision else "nein")
+        self._js("jarvis.onConfirmResolved", action_id, decision)
+        return True
 
     def _daemon_caption(self, text: str, duration: Optional[float] = None) -> None:
         """Eine gerade gesprochene Sentence → synchron ins Panel (getippt über die Sprechdauer)."""

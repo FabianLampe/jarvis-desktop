@@ -29,6 +29,16 @@ class Runtime:
         return [r["text"] for r in get_memory(self.ctx).search(text, 3)]
 
 
+    def learn(self, text: str) -> list[str]:
+        """Aussagen über sich selbst („Ich heiße …“, „Ich mag …“) aus einer NUTZERnachricht merken.
+        Gibt die Hinweise fürs Panel zurück („Gemerkt: …“); leer, wenn nichts oder abgeschaltet."""
+        if not self.cfg.memory.auto_learn:
+            return []
+        from .autolearn import learn
+        return [("Gemerkt (aktualisiert): " if updated else "Gemerkt: ") + fact
+                for fact, updated in learn(get_memory(self.ctx), text)]
+
+
 def spawn_agent(rt: "Runtime", interactive: bool = True) -> ToolAgent:
     """Neuer, unabhängiger Agent (eigener Kontext, eigener Abbruch, eigene Prozesse) für eine parallele
     Aufgabe. Browser, Wissensbasis, Gedächtnis, Erinnerungen werden mit den anderen Aufgaben geteilt."""
@@ -46,4 +56,5 @@ def build_runtime(cfg: AppConfig, client: Optional[OllamaClient] = None, *, inte
     rt = Runtime(cfg, ctx, reg, confirms, None)  # type: ignore[arg-type]
     rt.agent = ToolAgent(cfg, client if client is not None else OllamaClient(cfg.ollama_host),
                          reg, ctx, confirms, interactive=interactive, facts=rt.facts)
+    ctx.services["llm"] = rt.agent.client          # Werkzeuge mit eigenem Modellaufruf (Bildauswertung)
     return rt

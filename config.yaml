@@ -9,8 +9,11 @@ experience:
   startup_animation: true
   startup_briefing: true
   music_file: "/Users/fabian/Downloads/ACDC - Back In Black (Official Video).mp3"
-  music_volume: 0.28
-  music_duck_volume: 0.07
+  music_volume: 0.2         # während der Systemprüfung
+  music_duck_volume: 0.03   # unter dem gesprochenen Briefing
+  open_on_start:            # gehen beim Systemstart im Standardbrowser auf (nicht bei Neustart/Aufwachen)
+    - "https://calendar.google.com/calendar/r/day"
+    - "https://github.com/FabianLampe/jarvis-desktop/issues"
 
 # Fensterhintergrund: dark = durchgehend dunkle Fläche (gut bei hellem Wallpaper)
 #                     transparent = nur der Orb schwebt, Desktop scheint durch
@@ -137,7 +140,9 @@ profiles:
 tools:
   enabled: true
   workspace: null          # null ⇒ ~/Jarvis (Windows: %USERPROFILE%\Jarvis); dort darf Jarvis ohne Rückfrage schreiben
-  max_steps: 6
+  router: "auto"           # auto = ohne Stichworttreffer entscheidet das Modell, ob Werkzeuge nötig sind · keywords = nur Stichwörter
+  editor: "Visual Studio Code"   # „öffne es in VS Code“ — oder z. B. "Cursor", "Xcode", "PyCharm"
+  max_steps: 12            # Werkzeugaufrufe je Auftrag (mehrstufige Aufgaben brauchen Luft)
   shell_timeout_s: 60
   max_timeout_s: 600
   max_output_chars: 6000
@@ -157,7 +162,26 @@ reminders:
 research:
   searxng_url: null        # optional, z. B. "http://127.0.0.1:8080"; sonst DuckDuckGo
   max_sources: 4
-  max_chars_per_source: 3000
+  max_chars_per_source: 4500   # je Quelle die zur Frage passendsten Absätze, nicht bloß der Seitenanfang
+  only_trusted: false      # false = etablierte Quellen zuerst, Unbekanntes nur als gekennzeichnete Ergänzung
+                           # true  = ausschließlich etablierte Quellen (Liste in jarvis_core/tools/research_tools.py)
+  trusted_domains: []      # eigene vertrauenswürdige Seiten, z. B. ["ndr.de", "ct.de"]
+  blocked_domains: []      # Seiten, die Jarvis nie lesen soll
+
+network:
+  vendor_lookup: true      # Herstellernamen der Netzwerkgeräte: lädt einmalig die öffentliche IEEE-Liste (wireshark.org)
+
+# Wächter: Jarvis meldet sich von selbst (Mitteilung, Panel und — wenn der Sprach-Daemon läuft — per Stimme).
+proactive:
+  enabled: true
+  interval_min: 15         # Netz, Platte, Akku alle 15 min; Termine jede Minute
+  new_devices: true        # neues Gerät im Heimnetz (in großen, geteilten Netzen stumm)
+  calendar: true           # Termin beginnt in Kürze
+  calendar_lead_min: 15
+  disk: true
+  disk_warn_pct: 90
+  battery: true
+  battery_warn_pct: 15
 
 # Neue Adapter: bewusst keine unbekannten Hosts/Server automatisch verbinden.
 extensions:
@@ -168,11 +192,35 @@ extensions:
     enabled: false
     servers: {}              # Alias: {command: "/absoluter/pfad/zum/server", args: [], env_names: []}
   mac_ui:
-    enabled: false           # benötigt Bedienungshilfen-Zugriff des startenden Terminals / Jarvis
+    enabled: true            # Mac-Apps bedienen (Klicken, Tippen, „schreib in Notizen …“). Benötigt Bedienungshilfen-Zugriff:
+                             # Systemeinstellungen → Datenschutz & Sicherheit → Bedienungshilfen → Terminal einschalten.
+                             # Jede Aktion fragt nach; Text in Terminal & Co. und nach Fremdinhalt immer.
+
+# Apple Kurzbefehle (Jarvis: „Führe den Kurzbefehl … aus“, Smart-Home-Szenen, eigene Abläufe).
+# Ausführen fragt standardmäßig IMMER nach. Namen in `allowed` laufen ohne Rückfrage — aber nie, nachdem in
+# diesem Auftrag fremde Inhalte (Webseite, Datei, Mail) gelesen wurden. Nur harmlose Kurzbefehle eintragen!
+shortcuts:
+  allowed: []                # z. B. ["Licht Wohnzimmer aus", "Nicht stören an"] (exakter Name wie in der Kurzbefehle-App)
+
+# Bilder erzeugen (lokal, mflux/FLUX auf Apple Silicon). AUS, bis die Modellgewichte bewusst geladen wurden:
+# schnell = rund 34 GB Download (kleiner: model "filipstrand/Z-Image-Turbo-mflux-4bit", rund 6 GB).
+# Umgebung: python3 -m venv .venv-mflux && .venv-mflux/bin/pip install mflux. Die Erzeugung braucht viel Arbeitsspeicher
+# und läuft neben Ollama-Modellen langsam. Jarvis lädt nie selbst Gewichte herunter (Offline-Modus).
+image_generation:
+  enabled: false
+  model: "schnell"           # mflux-Modellname (schnell, dev, z-image-turbo …) oder Hugging-Face-Repo
+  quantize: 4                # 4 = weniger Speicher; 3|4|5|6|8
+  steps: 4                   # schnell: 2–4 genügen
+  # command: null            # Pfad zu mflux-generate; Standard: .venv-mflux/bin/mflux-generate, dann PATH
+
+# Gedächtnis
+memory:
+  auto_learn: true           # „Ich heiße …“, „Ich wohne in …“, „Ich mag …“, „Mein Lieblings… ist …“ selbst merken
+                             # (nur Sirs eigene Nachrichten; Panel-Hinweis „Gemerkt: …“; „Merk dir …“ geht immer)
 
 # Integrationen — jede einzeln aktivierbar. Zugangsdaten stehen in .env (nie hier).
 integrations:
-  google_calendar: { enabled: false }   # .secrets/credentials.json + Login, siehe README
+  google_calendar: { enabled: true }   # .secrets/credentials.json + Login, siehe README
   spotify:         { enabled: false }   # JARVIS_SPOTIFY_CLIENT_ID (+ Login)
   home_assistant:  { enabled: false }   # JARVIS_HA_URL, JARVIS_HA_TOKEN
   telegram:        { enabled: false }   # JARVIS_TELEGRAM_TOKEN, JARVIS_TELEGRAM_CHAT_ID

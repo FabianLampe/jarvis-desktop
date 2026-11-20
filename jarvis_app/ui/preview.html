@@ -112,17 +112,27 @@
         xp.steps[i].state = i === 1 && !demoMusic.playing ? 'skip' : 'ok';
         xp.steps[i].detail = i === 1 ? musicNote || (demoMusic.playing ? demoMusic.file :
           demoMusic.configured ? 'Soundtrack ist für „Aufwachen“ bereit' : 'Audiodatei über „Musik wählen“ hinzufügen') :
-          ['Overlay verbunden', '', 'Lokaler Speicher erreichbar', 'qwen2.5:14b', 'Sprach-Daemon verbunden', 'Wetter und Tagesübersicht geladen'][i];
+          ['Overlay verbunden', '', 'Lokaler Speicher erreichbar', 'qwen3.6:35b', 'Sprach-Daemon verbunden', 'Wetter und Tagesübersicht geladen'][i];
         xp.progress = Math.round((i + 1) / labels.length * 100);
         if (i === labels.length - 1) {
-          xp.phase = 'ready'; xp.warnings = 0;
-          window.pywebview.api.request_briefing();
+          window.pywebview.api.request_briefing(true);   // Übersicht vor „ready“, wie in der App
+          xp.phase = 'ready'; xp.warnings = 0; xp.speaking = true;
+          DEMO_BRIEFING.forEach(function (line, n) {
+            setTimeout(function () { if (demoRun === run) window.jarvis.onCaption(line, 2.2); }, 400 + n * 2400);
+          });
+          setTimeout(function () {
+            if (demoRun !== run) return;
+            xp.speaking = false; window.jarvis.onExperience(xp); stopPreviewMusic(true);
+          }, 400 + DEMO_BRIEFING.length * 2400);
         }
         window.jarvis.onExperience(xp);
       }, i * 850 + 850);
     });
     return P({ok: true});
   }
+
+  var DEMO_BRIEFING = ['Willkommen zurück, Sir.', 'Heute stehen 3 Termine an.',
+    'Um 9 Uhr: Daily Stand-up.', 'Um 14 Uhr 30: Projekt Alpha Review.', 'Möchten Sie zu etwas mehr hören, Sir?'];
 
   var DEMO_ANSWER = 'Selbstverständlich, Sir. Die Diagnose läuft bereits — ' +
     'alle Systeme arbeiten innerhalb der Parameter. Der Reaktor liefert stabile ' +
@@ -158,6 +168,9 @@
         return P({ cpu: 17, ram: 46, vram: 63, model: 'qwen2.5:3b', tps: 87,
                    heavy: 'BEREIT', heavy_available: true, online: true, daemon: false });
       },
+      attach_image: function (url, name) {
+        return P({ ok: true, rel: 'Bilder/vorschau-' + Date.now() + '.png', path: '/tmp/vorschau.png' });
+      },
       send_message: function (text, force) {
         var sid = 's' + Date.now();
         var normalized = text.toLowerCase().replace(/[^a-zäöüß ]/g, '').replace(/^(hey )?jarvis */, '').trim();
@@ -191,18 +204,21 @@
         return P({ orb_px: Math.round(zone / 1.5), zone: zone });
       },
       push_to_talk: function () { return P({ sent: false }); },
-      request_briefing: function () {
+      request_briefing: function (now) {
         var briefingRun = demoRun;
-        setTimeout(function () {
+        (now ? function (fn) { fn(); } : function (fn) { setTimeout(fn, 100); })(function () {
           if (briefingRun !== demoRun) return;
           window.jarvis.onBriefing({
+          calendar: true,
+          events: [{ time: '09:00', title: 'Daily Stand-up' }, { time: '14:30', title: 'Projekt Alpha Review' },
+                   { time: null, title: 'Abgabe Jarvis-Doku' }],
           datetime: 'Dienstag, 16. Juni, 22 Uhr 30',
           weather: { temp_now: 14, temp_max: 18, temp_min: 9, text: 'bewölkt', ort: 'Hamburg' },
           mails: [{ sender: 'Alice', subject: 'Rechnung Juni' }, { sender: 'Bob', subject: 'Meeting morgen' }],
           issues: [{ number: 5, title: 'Orb flackert bei Last' }],
           system: { cpu: 12, ram: 41, vram: 63 }, repo: 'FabianLampe/jarvis-desktop' });
-          stopPreviewMusic(true);
-        }, 100);
+          if (!now) stopPreviewMusic(true);
+        });
         return P({ ok: true });
       },
       reset_chat: function () { return P({ ok: true }); },

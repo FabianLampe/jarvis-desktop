@@ -170,9 +170,9 @@ class ChatService:
         finally:
             if heavy and self._current(generation, cancel):
                 # 3B-Paar zurückladen, damit das nächste Routing latenzfrei ist
-                self.client.preload(profile.general, self.cfg.keep_alive)
+                self.client.preload(profile.general, self.cfg.keep_alive, profile.num_ctx)
                 if profile.coder != profile.general:
-                    self.client.preload(profile.coder, self.cfg.keep_alive)
+                    self.client.preload(profile.coder, self.cfg.keep_alive, profile.num_ctx)
 
         if heavy:
             yield {"type": "swap", "phase": "restore_pair"}

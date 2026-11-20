@@ -186,3 +186,122 @@ MCP-Bild-/Audioantworten sind nicht enthalten. Nichttext-Blöcke werden im Ergeb
 Getestet wurden lokale Git-Repositories, echte pytest-Läufe, CSV/Diagramm-/Dokumentausgabe,
 Bestätigungen/Abbruch und ein eigener stdio-MCP-Testserver. Mac-AX-Aufrufe sind gegen einen
 API-Stand-in geprüft; kein realer Mac, SSH-Pi oder GitHub-Schreibzugriff wurde aus dieser Umgebung bedient.
+
+
+## Überarbeitung November 2026: Auswahl, Netzwerk, Recherche, Schutz, Diagnose, Sehen, Wächter
+
+### Werkzeugauswahl durch das Modell (`tools.router: auto`)
+
+Bisher entschied allein eine Stichwortliste, ob Jarvis Werkzeuge benutzt. Die Liste bleibt als
+Schnellweg. Trifft sie nichts, ordnet das Modell die Anfrage in einem kurzen Aufruf (warm ca. 0,1–0,6 s)
+einer oder mehreren Werkzeuggruppen zu oder schickt sie in den normalen Chat. Fällt die Weiche aus,
+läuft die Anfrage wie bisher als Chat. `tools.router: keywords` stellt das alte Verhalten wieder her.
+Das Schrittlimit je Auftrag liegt bei 12 (`tools.max_steps`).
+
+### Neue Werkzeuge
+
+| Werkzeug | Gruppe | Funktion |
+|---|---|---|
+| `network_overview` | network | Verbindungsart, eigene IP, Netzbereich, Router, DNS, WLAN-Kanal/Signal, Internet-Latenz. |
+| `network_devices` | network | Geräte im Netz mit IP, Name, Hersteller, MAC; markiert Router, diesen Mac und neue Geräte. |
+| `network_name_device` | network | Einem Gerät einen eigenen Namen geben („192.168.178.31 ist mein iPhone“). |
+| `network_speedtest` | network | Download, Upload, Latenz (Apples `networkQuality`, ca. 20 s). |
+| `network_ports` | network | Erreichbare Dienste an einem Gerät; nur private Adressen im eigenen Netz. |
+| `system_health` | health | Speicherplatz, RAM, CPU, Akku, Laufzeit, größte Verbraucher, Auffälligkeiten. |
+| `bluetooth_devices` | health | Gekoppelte/verbundene Bluetooth-Geräte samt Akkustand. |
+| `software_updates` | health | Ausstehende macOS-Updates (installiert nichts). |
+| `screen_look` | vision | Bildschirm ansehen und Fragen dazu beantworten (lokales Modell, Bild bleibt auf dem Rechner). |
+| `image_look` | vision | Bilddatei ansehen (PNG, JPG, HEIC …). |
+
+Hinweise: Den WLAN-Namen verbirgt macOS ohne Ortungsfreigabe für das startende Terminal bzw. Jarvis.
+Herstellernamen stammen aus der öffentlichen IEEE-Liste, die einmalig geladen und 90 Tage gecacht wird
+(`network.vendor_lookup: false` schaltet das ab). In sehr großen Netzen (mehr als 1024 Adressen) wird nur
+der eigene /24-Bereich aktiv abgefragt und die Liste zusammengefasst.
+
+### Recherche
+
+- Quellen werden eingestuft: etablierte Seiten zuerst, soziale Netzwerke und Frageportale gar nicht,
+  Unbekanntes nur als gekennzeichnete Ergänzung, solange weniger als zwei etablierte Belege vorliegen.
+  `research.only_trusted: true` liest ausschließlich etablierte Quellen; eigene Listen über
+  `research.trusted_domains` und `research.blocked_domains`.
+- Je Quelle gehen die zur Frage passendsten Absätze ans Modell statt des Seitenanfangs; die Recherche hat
+  ein eigenes Ausgabebudget (18 000 Zeichen) und wird nicht mehr mitten im Text gekappt.
+- `fetch_url` kennt `focus` für lange Seiten. Seiten, die ihren Inhalt erst per JavaScript laden, liest es
+  bewusst nicht über den Browser nach (dort greift die Adressprüfung nicht); Jarvis meldet das und Sir kann
+  die Seite ausdrücklich im Browser öffnen lassen.
+
+### Schutz vor Prompt Injection
+
+- Fremder Text wird vor dem Modell bereinigt: unsichtbare Zeichen, Rollenmarken von Chat-Vorlagen und
+  nachgemachte Blockmarkierungen werden entfernt. Sieht der Text nach Anweisungen aus, bekommt das Modell
+  eine ausdrückliche Warnung.
+- Abfluss-Schutz: Hat ein Auftrag fremden Inhalt UND persönliche Daten gelesen, braucht jedes Werkzeug mit
+  Weg nach außen (Websuche, Seitenabruf, Browser, Telegram, Discord, GitHub) die Bestätigung des Nutzers.
+- Die Vorsicht nach fremdem Inhalt gilt drei Folgeaufträge weiter (so lange steht der Inhalt im Verlauf)
+  und endet mit „Neuer Chat“.
+- Seitenabrufe prüfen die Adresse am Verbindungsaufbau selbst; DNS-Rebinding auf interne Adressen und
+  Umgebungs-Proxys kommen nicht mehr durch.
+- `tests/test_injection.py` enthält Angriffstexte und Abläufe, die bei jeder Änderung mitlaufen.
+
+### Wächter (`proactive`)
+
+Jarvis meldet sich von selbst per Mitteilung, im Panel und – bei laufendem Sprach-Daemon – per Stimme:
+neues Gerät im Heimnetz, Termin beginnt in Kürze, Platte fast voll, Akku fast leer. Jede Sache wird
+einmal gemeldet. In großen, geteilten Netzen (mehr als 64 Geräte) bleibt die Gerätemeldung stumm.
+Abschalten über `proactive.enabled: false` oder einzeln je Prüfung.
+
+## Kamera, Bilder im Chat, Code im Editor (November 2026)
+
+| Werkzeug / Funktion | Gruppe | Funktion |
+|---|---|---|
+| `camera_look` | vision | Nimmt ein Foto mit der Kamera auf (rund 1–2 s, grünes Licht) und beantwortet eine Frage dazu, z. B. Gesichtsausdruck, „wie sehe ich aus“, was vor der Kamera ist. Das Foto wird danach gelöscht; `save: true` legt es unter `Kamera/` ab. Keine Identifizierung von Personen, keine Vermutungen über sensible Merkmale. |
+| `open_in_editor` | editor | Öffnet Datei oder Ordner in VS Code (Standard, `tools.editor`), Cursor, Xcode, PyCharm, Sublime, Zed. |
+| Bild anhängen | Chat | Bild einfügen (⌘V), ins Panel ziehen oder über ⧉ wählen. Es landet unter `~/Jarvis/Bilder/` und Jarvis wertet es mit `image_look` aus. |
+
+Kamera einrichten: Beim ersten Foto fragt macOS nach der Kamerafreigabe für das Programm, aus dem Jarvis
+gestartet wurde (meist Terminal). Wurde sie abgelehnt: Systemeinstellungen → Datenschutz & Sicherheit →
+Kamera → Terminal einschalten, Jarvis neu starten. Die Aufnahme läuft in einem eigenen Prozess
+(`camera_worker.py`, OpenCV aus `requirements-tools.txt`). Nach dem Lesen fremder Inhalte braucht die Kamera
+eine Bestätigung, damit eine Webseite sie nicht einschalten kann.
+
+Code: „Schreib ein Python-Skript … und öffne es in VS Code“ legt die Datei unter `~/Jarvis/Code/` an,
+führt sie einmal zur Prüfung aus (nur wenn sie ohne Eingaben läuft) und öffnet sie im Editor.
+
+## Kurzbefehle, Mac-Apps, Projekte, Musik, Bilder, Kamerawache (November 2026, Teil 2)
+
+Gemeinsame Regeln: AppleScript ist immer fester Code (`on run argv`), Werte kommen nur als Argument
+(`tools/mac_script.py`); alle Unterprozesse sind argv-Listen ohne Shell; Namen von Kurzbefehlen, Titeln,
+Playlists, Notizen und Dateien werden mit `clean()` bereinigt und als Fremdinhalt markiert. Tests starten nie
+echte Prozesse (`tests/conftest.py` sperrt `mac_script._spawn`).
+
+| Werkzeug | Gruppe | Richtlinie |
+|---|---|---|
+| `shortcuts_list`, `shortcut_run` | shortcuts | Name muss exakt in `shortcuts list` stehen. Ausführen = Rückfrage, außer der Name steht in `shortcuts.allowed` **und** es wurde nichts Fremdes gelesen. Eingabe über `--input-path` (temporäre Datei). Ausgabe = Fremdinhalt; Abfluss-Schutz (OUTBOUND). |
+| `app_type_text(app, text)` | mac_ui | Aktiviert die App, tippt per System Events (App und Text nur als argv). Nur wenn `extensions.mac_ui.enabled`. Rückfrage bei Terminal, iTerm, Systemeinstellungen, Schlüsselbund & Co. und nach Fremdinhalt. Ohne Bedienungshilfen-Freigabe kommt die Anleitung „Systemeinstellungen → Datenschutz & Sicherheit → Bedienungshilfen → Terminal“. |
+| `project_create` | projects | `~/Jarvis/Code/<name>` (Name `[A-Za-z0-9_-]`): README, .gitignore, main.py, `.venv`, `git init`. Mit `packages` immer Rückfrage; nach Fremdinhalt Rückfrage. |
+| `project_install` | projects | `pip install` in die `.venv` des Projekts. **Immer** Rückfrage (fremder Code). Paketnamen nur Name + Version (`flask>=3,<4`), keine URLs, Pfade, Optionen. |
+| `run_script` | terminal | Liegt ein Python-Skript in einem Projekt mit `.venv`, läuft es mit deren Python. |
+| `git_commit` | git | Im Arbeitsordner ohne Rückfrage, außerhalb und nach Fremdinhalt mit. Hooks sind aus; `.env`, `*.pem`, `*.key`, `id_rsa*` … werden nie aufgenommen (und im Ergebnis genannt). |
+| `git_push` | git | **Immer** Rückfrage (zeigt Remote-URL und Branch). Kein Force, keine Refspecs. |
+| `music_control`, `music_now` | music | Apple Music. `play` mit `query`: erst Playlist gleichen Namens, dann Stimmung → Playlist mit passendem Namen („etwas Ruhiges“ → „…Entspannt…“), sonst Titel-/Interpretensuche in der Mediathek; passt nichts, nennt Jarvis ehrlich die vorhandenen Playlists. Die App startet nur bei `play`. „Musik“ ohne Dienst = Apple Music, Spotify nur auf Zuruf. |
+| `notes_create`, `notes_search` | notes | Apple Notizen. Text wird zu maskiertem HTML (kein Markup-Einschleusen). Anlegen: nach Fremdinhalt Rückfrage. Suche: persönliche Daten (PRIVATE), Ausgabe = Fremdinhalt. |
+| `spotlight_search` | spotlight | `mdfind` im Benutzerordner (ohne ~/Library, versteckte und geschützte Pfade), Namen vor Inhalt, höchstens 20 Treffer, nach Änderungsdatum. Suchbegriff wird auf harmlose Zeichen reduziert. PRIVATE. |
+| `system_control` | system | Feste Aktionen: Dunkelmodus an/aus/umschalten, Bildschirm sperren, Display schlafen, Papierkorb leeren (Rückfrage), WLAN an/aus (Rückfrage). „Nicht stören“ ist ohne Kurzbefehl nicht schaltbar – Jarvis sagt das und erklärt den Kurzbefehl-Weg. |
+| `unit_convert` | math | Einheiten offline (Länge, Gewicht, Volumen, Tempo, Temperatur, Fläche, Daten, Zeit); auch im Schnellpfad („Wie viele Kilometer sind 5 Meilen?“). |
+| `image_generate` | imagegen | mflux (FLUX auf MLX). Aus, bis `image_generation.enabled: true`. Läuft im eigenen Prozess mit 10 min Zeitlimit und `HF_HUB_OFFLINE=1` – Jarvis lädt nie selbst Gewichte. Ohne Gewichte kommt eine Einrichtungsanleitung (schnell ≈ 34 GB, `filipstrand/Z-Image-Turbo-mflux-4bit` ≈ 6 GB). Ausgabe `~/Jarvis/Bilder/generiert-<Zeit>.png`, danach in Vorschau geöffnet. mflux liegt in einer eigenen Umgebung `.venv-mflux` (bringt torch und OpenCV mit, rund 1,3 GB). Braucht viel Arbeitsspeicher; neben den Ollama-Modellen langsam. |
+| `camera_watch_start/stop/status` | vision | Bewegungserkennung per Frame-Differenz in eigenem Prozess (`camera_watch_worker.py`): keine Gesichtserkennung, nichts wird gespeichert. Start **immer** mit Rückfrage, höchstens 60 min, Empfindlichkeit low/medium/high, höchstens eine Meldung je 60 s. Meldung über `ctx.shared["notify"]` (Bridge → `_on_watcher_notice`: Mitteilung, Panel, Stimme). Der Prozess endet mit der Zeit, mit `camera_watch_stop`, beim Beenden von Jarvis (Bridge + atexit) oder wenn Jarvis verschwindet. |
+
+### Kleinigkeiten
+
+- **Wetter-Rat**: „Brauche ich eine Jacke/einen Schirm?“, „Was soll ich anziehen?“ → Schnellpfad ohne LLM: Wetterbericht plus
+  deterministischer Satz aus Temperatur, Regenwahrscheinlichkeit, Wind und Wettercode (`weather_tools.clothing_advice`).
+- **Timer-Schnellpfad**: „Stell einen Timer auf 10 Minuten“, „Wecker in 2 Stunden“, „Timer für eine halbe Stunde“ → Erinnerung ohne LLM.
+- **Selbst merken** (`memory.auto_learn`, Standard an; `jarvis_core/autolearn.py`): Nur aus Sirs eigenen Nachrichten (Bridge, vor dem
+  Routing), nie aus Werkzeugausgaben. Erkannt werden ganze, nicht-fragende Sätze: „Ich heiße …“, „Mein Name ist …“,
+  „Ich wohne/lebe in …“, „Ich komme aus …“, „Ich arbeite als/bei/für …“, „Ich studiere …“, „Ich mag/liebe/bevorzuge/hasse …“,
+  „Ich trinke/esse/höre gern …“, „Mein Lieblings… ist …“, „Ich bin allergisch gegen …“, „Ich bin Vegetarier/Veganer“.
+  **Entscheidung gegen Falschtreffer:** Sätze mit „du/dich/dir“, Nebensätzen („dass, wenn, weil …“), Befehlswörtern („mach, zeig, öffne …“),
+  Fragen und Aussagen, die mit „es/das/nicht“ beginnen, werden nicht gemerkt („Ich mag nicht, dass du …“, „Ich mag es, wenn du kurz
+  antwortest“, „Ich mag Kaffee, mach mir einen“). Solche Vorlieben gehören mit „Merk dir, dass …“ gespeichert. Dubletten werden übersprungen;
+  Themen mit nur einem Wert (Name, Wohnort, Herkunft, Beruf, Studium, Lieblings-X) ersetzen den älteren Eintrag.
+  Das Panel zeigt „Gemerkt: …“ bzw. „Gemerkt (aktualisiert): …“.

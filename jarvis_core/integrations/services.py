@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from ..tools.registry import (ALLOW, CONFIRM, Assessment, Tool, ToolContext, ToolError,
+from ..tools.registry import (ALLOW, CONFIRM, Assessment, InvalidArgs, Tool, ToolContext, ToolError,
                               ToolResult, wrap_untrusted)
 from .base import Integration, Status, secrets_dir
 
@@ -60,7 +60,8 @@ class GoogleCalendar(Integration):
         return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
     def probe(self) -> Status:
-        self.service().calendarList().list(maxResults=1).execute()
+        # calendarList braucht calendar.readonly — mit dem Termine-Scope nur den Hauptkalender prüfen
+        self.service().events().list(calendarId="primary", maxResults=1).execute()
         return Status("ready", "verbunden")
 
 
@@ -281,24 +282,184 @@ def calendar_upcoming(ctx: ToolContext, a: dict) -> ToolResult:
     return ToolResult(True, wrap_untrusted("\n".join(rows)))
 
 
-def calendar_create(ctx: ToolContext, a: dict) -> ToolResult:
+def today_events(g: GoogleCalendar, timezone: str) -> list[dict]:
+    """Heutige Termine aus dem Hauptkalender: [{time: "10:30" | None (ganztägig), title}]."""
+    tz = ZoneInfo(timezone)
+    start = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    res = g.service().events().list(calendarId="primary", timeMin=start.isoformat(),
+                                    timeMax=(start + timedelta(days=1)).isoformat(),
+                                    singleEvents=True, orderBy="startTime", maxResults=20).execute()
+    out = []
+    for e in res.get("items", []):
+        when = e.get("start", {}).get("dateTime")
+        out.append({"time": datetime.fromisoformat(when).astimezone(tz).strftime("%H:%M") if when else None,
+                    "title": e.get("summary") or "(ohne Titel)"})
+    return out
+
+
+_DAYS = ("Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag")
+_MONTHS = ("Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August",
+           "September", "Oktober", "November", "Dezember")
+
+
+def _clock(dt: datetime) -> str:
+    return f"{dt.hour} Uhr" if dt.minute == 0 else f"{dt.hour}:{dt.minute:02d} Uhr"
+
+
+def _human(dt: datetime, end: Optional[datetime] = None) -> str:
+    """„Montag, 2. November, 18 bis 20 Uhr“ — so steht es in der Bestätigung und so wird es gesprochen."""
+    day = f"{_DAYS[dt.weekday()]}, {dt.day}. {_MONTHS[dt.month - 1]}"
+    if end is None:
+        return f"{day}, {_clock(dt)}"
+    if end.date() != dt.date():
+        return f"{day}, {_clock(dt)} bis {_human(end)}"
+    if dt.minute == 0 and end.minute == 0:
+        return f"{day}, {dt.hour} bis {end.hour} Uhr"
+    return f"{day}, {_clock(dt)[:-4]} bis {_clock(end)}"
+
+
+def _when(text: str, tz: str, what: str) -> datetime:
     from ..memory.when import parse_when
+    try:
+        return parse_when(text, tz=tz)
+    except ValueError as exc:
+        raise InvalidArgs(f"{what} „{text}“ nicht verstanden — frage Sir nach Tag und Uhrzeit.") from exc
+
+
+def _span(a: dict, tz: str) -> tuple[datetime, datetime]:
+    """Beginn/Ende prüfen: nie in der Vergangenheit, Ende nach Beginn (Standard: eine Stunde)."""
+    start = _when(str(a.get("start", "")), tz, "Beginn")
+    end = _when(str(a["end"]), tz, "Ende") if a.get("end") else start + timedelta(hours=1)
+    if start < datetime.now(ZoneInfo(tz)) - timedelta(minutes=5):
+        # Meist fehlte der Tag („18 Uhr“, aber heute ist 18 Uhr vorbei) — nachfragen statt raten.
+        raise InvalidArgs(f"{_human(start)} liegt in der Vergangenheit. Frage Sir, welcher Tag gemeint ist.")
+    if end <= start:
+        raise InvalidArgs(f"Das Ende ({_human(end)}) liegt nicht nach dem Beginn ({_human(start)}). Frage Sir nach der richtigen Zeit.")
+    return start, end
+
+
+def calendar_create(ctx: ToolContext, a: dict) -> ToolResult:
     g = _integ(ctx, "google_calendar"); g.require_ready()
     tz = ctx.cfg.reminders.timezone
-    start = parse_when(str(a.get("start", "")), tz=tz)
-    end = parse_when(str(a["end"]), tz=tz) if a.get("end") else start + timedelta(hours=1)
+    start, end = _span(a, tz)
     body = {"summary": str(a.get("title", "")), "start": {"dateTime": start.isoformat(), "timeZone": tz},
             "end": {"dateTime": end.isoformat(), "timeZone": tz}}
     try:
         ev = g.service().events().insert(calendarId="primary", body=body).execute()
     except Exception as exc:  # noqa: BLE001
         raise ToolError(f"Termin nicht angelegt: {type(exc).__name__}: {exc}"[:240]) from exc
-    return ToolResult(True, f"Termin angelegt: {body['summary']} am {start:%d.%m.%Y %H:%M} (id {ev.get('id')})")
+    return ToolResult(True, f"Termin angelegt: „{body['summary']}“ am {_human(start, end)} (id {ev.get('id')})")
+
+
+def _find_events(ctx: ToolContext, a: dict) -> list[dict]:
+    """Termine nach Titel (Teilwort, ohne Groß/Klein) am genannten Tag, sonst ab heute 60 Tage.
+    Ohne Titel, aber mit Tag: alle Termine dieses Tages (die Bestätigung listet jeden einzeln)."""
+    g = _integ(ctx, "google_calendar"); g.require_ready()
+    tz = ctx.cfg.reminders.timezone
+    zone = ZoneInfo(tz)
+    title = str(a.get("title", "")).strip().lower()
+    if not title and not a.get("day"):
+        raise InvalidArgs("Welcher Termin? Frage Sir nach Titel oder Tag.")
+    if a.get("day"):
+        begin = _when(str(a["day"]), tz, "Tag").replace(hour=0, minute=0)
+        until = begin + timedelta(days=1)
+    else:
+        begin = datetime.now(zone).replace(hour=0, minute=0, second=0, microsecond=0)
+        until = begin + timedelta(days=60)
+    try:
+        items = g.service().events().list(calendarId="primary", timeMin=begin.isoformat(),
+                                          timeMax=until.isoformat(), singleEvents=True,
+                                          orderBy="startTime", maxResults=100).execute().get("items", [])
+    except Exception as exc:  # noqa: BLE001
+        raise ToolError(f"Kalender-Abfrage fehlgeschlagen: {type(exc).__name__}: {exc}"[:240]) from exc
+    found = [e for e in items if title in (e.get("summary") or "").lower()]
+    if not found:
+        raise InvalidArgs(f"Kein Termin{f' „{title}“' if title else ''} gefunden" + (f" am {a['day']}." if a.get("day") else "."))
+    return found
+
+
+def _event_line(e: dict) -> str:
+    title = f"„{e.get('summary', '(ohne Titel)')}“"
+    if when := e.get("start", {}).get("dateTime"):
+        end = e.get("end", {}).get("dateTime")
+        return f"{title} {_human(datetime.fromisoformat(when), datetime.fromisoformat(end) if end else None)}"
+    day = datetime.fromisoformat(e.get("start", {}).get("date") or "1970-01-01")
+    return f"{title} {_DAYS[day.weekday()]}, {day.day}. {_MONTHS[day.month - 1]}, ganztägig"
+
+
+def calendar_delete(ctx: ToolContext, a: dict) -> ToolResult:
+    events = _find_events(ctx, a)
+    service = _integ(ctx, "google_calendar").service()
+    for e in events:
+        try:
+            service.events().delete(calendarId="primary", eventId=e["id"]).execute()
+        except Exception as exc:  # noqa: BLE001
+            raise ToolError(f"Löschen von {_event_line(e)} fehlgeschlagen: {type(exc).__name__}"[:240]) from exc
+    return ToolResult(True, f"{len(events)} Termin(e) gelöscht: " + ", ".join(_event_line(e) for e in events))
+
+
+def calendar_update(ctx: ToolContext, a: dict) -> ToolResult:
+    events = _find_events(ctx, a)
+    if len(events) > 1:
+        raise InvalidArgs("Mehrere Termine passen: " + ", ".join(_event_line(e) for e in events)
+                          + ". Frage Sir, welcher gemeint ist (Tag angeben).")
+    e = events[0]
+    tz = ctx.cfg.reminders.timezone
+    patch: dict = {}
+    if a.get("new_title"):
+        patch["summary"] = str(a["new_title"])
+    if a.get("start"):
+        old = e.get("start", {}).get("dateTime")
+        old_end = e.get("end", {}).get("dateTime")
+        keep = (datetime.fromisoformat(old_end) - datetime.fromisoformat(old)) if old and old_end else timedelta(hours=1)
+        start = _when(str(a["start"]), tz, "Beginn")
+        start, end = _span({"start": start.isoformat(), "end": a.get("end") or (start + keep).isoformat()}, tz)
+        patch["start"] = {"dateTime": start.isoformat(), "timeZone": tz}
+        patch["end"] = {"dateTime": end.isoformat(), "timeZone": tz}
+    elif a.get("end"):
+        raise ToolError("Für ein neues Ende bitte auch den Beginn angeben.")
+    if not patch:
+        raise ToolError("Was soll sich ändern? Neuer Titel oder neue Zeit fehlt.")
+    try:
+        _integ(ctx, "google_calendar").service().events().patch(
+            calendarId="primary", eventId=e["id"], body=patch).execute()
+    except Exception as exc:  # noqa: BLE001
+        raise ToolError(f"Termin nicht geändert: {type(exc).__name__}: {exc}"[:240]) from exc
+    return ToolResult(True, f"Termin {_event_line(e)} geändert"
+                      + (f": jetzt {_human(start, end)}" if "start" in patch else "")
+                      + (f", Titel „{patch['summary']}“" if "summary" in patch else "") + ".")
+
+
+def _assess_calendar_delete(ctx: ToolContext, a: dict) -> Assessment:
+    # Die Bestätigung zeigt die tatsächlich betroffenen Termine; kein Treffer ⇒ gar keine Rückfrage.
+    events = _find_events(ctx, a)
+    return Assessment(CONFIRM, ("Termin löschen: " if len(events) == 1 else f"{len(events)} Termine löschen: ")
+                      + ", ".join(_event_line(e) for e in events))
+
+
+def _assess_calendar_update(ctx: ToolContext, a: dict) -> Assessment:
+    events = _find_events(ctx, a)
+    if len(events) > 1:
+        raise InvalidArgs("Mehrere Termine passen: " + ", ".join(_event_line(e) for e in events)
+                          + ". Frage Sir, welcher gemeint ist (Tag angeben).")
+    change = []
+    if a.get("start"):
+        e = events[0]
+        tz = ctx.cfg.reminders.timezone
+        old, old_end = e.get("start", {}).get("dateTime"), e.get("end", {}).get("dateTime")
+        keep = (datetime.fromisoformat(old_end) - datetime.fromisoformat(old)) if old and old_end else timedelta(hours=1)
+        start = _when(str(a["start"]), tz, "Beginn")
+        start, end = _span({"start": start.isoformat(), "end": a.get("end") or (start + keep).isoformat()}, tz)
+        change.append(f"neu {_human(start, end)}")
+    if a.get("new_title"):
+        change.append(f"neuer Titel „{a['new_title']}“")
+    return Assessment(CONFIRM, f"Termin ändern: {_event_line(events[0])}" + (" → " + ", ".join(change) if change else ""))
 
 
 def _assess_calendar_create(ctx: ToolContext, a: dict) -> Assessment:
-    return Assessment(CONFIRM, f"KALENDERTERMIN ANLEGEN: „{a.get('title')}“ am {a.get('start')}"
-                               + (f" bis {a.get('end')}" if a.get("end") else ""))
+    # Bestätigt wird der tatsächlich berechnete Termin, nicht der Rohtext des Modells.
+    start, end = _span(a, ctx.cfg.reminders.timezone)
+    return Assessment(CONFIRM, f"Termin „{a.get('title')}“ eintragen: {_human(start, end)}")
 
 
 def spotify_now(ctx: ToolContext, a: dict) -> ToolResult:
@@ -385,8 +546,20 @@ def tools() -> list[Tool]:
     return [
         Tool("integration_status", "integrations", "Zeigt, welche Integrationen eingerichtet sind.", {}, (), integration_status),
         Tool("calendar_upcoming", "integrations", "Nächste Termine im Google Kalender.", {"days": I}, (), calendar_upcoming, untrusted=True),
-        Tool("calendar_create", "integrations", "Legt einen Kalendertermin an (Bestätigung nötig).",
+        Tool("calendar_create", "integrations",
+             "Legt EINEN Kalendertermin an (Bestätigung nötig). Ein Zeitraum wie „zwischen 18 und 20 Uhr“ "
+             "oder „18 bis 20 Uhr“ ist EIN Termin: start = Beginn, end = Ende — nie zwei Termine. "
+             "start/end so übergeben, wie Sir sie sagt (z. B. „morgen 18 Uhr“); ein ISO-Datum nur, wenn der Tag feststeht.",
              {"title": S, "start": S, "end": S}, ("title", "start"), calendar_create, _assess_calendar_create),
+        Tool("calendar_delete", "integrations",
+             "Löscht Termine nach Titel und/oder Tag (z. B. day „heute“ ohne title = alle Termine heute). "
+             "Die Bestätigung zeigt die gefundenen Termine.",
+             {"title": S, "day": S}, (), calendar_delete, _assess_calendar_delete),
+        Tool("calendar_update", "integrations",
+             "Verschiebt oder benennt einen Termin um. Gesucht wird nach title (optional day); "
+             "neue Zeit über start/end, neuer Name über new_title.",
+             {"title": S, "day": S, "start": S, "end": S, "new_title": S}, ("title",),
+             calendar_update, _assess_calendar_update),
         Tool("spotify_now", "integrations", "Was gerade auf Spotify läuft.", {}, (), spotify_now),
         Tool("spotify_control", "integrations", "Spotify steuern: play (optional query), pause, next, previous.",
              {"action": {**S, "enum": ["play", "pause", "next", "previous"]}, "query": S}, ("action",), spotify_control),

@@ -36,6 +36,7 @@ class BriefingService:
                 "weather": ex.submit(weather.today, b.weather_lat, b.weather_lon),
                 "issues": ex.submit(github.open_issues, b.github_repo, token, b.github_issue_limit),
                 "mails": ex.submit(self._mails),
+                "events": ex.submit(self._events),
             }
             results = {k: self._safe(f) for k, f in tasks.items()}
         w = results["weather"]
@@ -46,6 +47,8 @@ class BriefingService:
             "weather": w,
             "issues": results["issues"],
             "mails": results["mails"],
+            "events": results["events"],
+            "calendar": self._calendar() is not None,
             "system": self.sysmon.status(),
             "repo": b.github_repo,
         }
@@ -58,6 +61,18 @@ class BriefingService:
         if service is None:
             return None
         return gmail.recent_unread(service, self.cfg.briefing.gmail_max)
+
+    def _calendar(self):
+        from ..integrations.services import GoogleCalendar
+        g = GoogleCalendar(self.cfg.integrations.get("google_calendar"))
+        return g if g.status(probe=False).state == "ready" else None
+
+    def _events(self):
+        g = self._calendar()
+        if g is None:
+            return None
+        from ..integrations.services import today_events
+        return today_events(g, self.cfg.reminders.timezone)
 
     @staticmethod
     def _safe(future):
@@ -79,6 +94,21 @@ def build_script(data: dict) -> list[str]:
                  f"Höchstwert {w['temp_max']}, Tiefstwert {w['temp_min']} Grad.")
     else:
         s.append("Das Wetter erreiche ich gerade nicht, Sir.")
+
+    events = data.get("events")
+    if events:
+        n = len(events)
+        s.append("Heute steht ein Termin an." if n == 1 else f"Heute stehen {n} Termine an.")
+        for e in events[:4]:
+            h, _, m = (e.get("time") or "").partition(":")
+            when = f"Um {int(h)} Uhr{'' if m == '00' else ' ' + str(int(m))}" if h else "Ganztägig"
+            s.append(f"{when}: {e['title']}.")
+        if n > 4:
+            s.append("Den Rest habe ich Ihnen im Kalender geöffnet.")
+    elif events is not None:
+        s.append("Heute stehen keine Termine im Kalender.")
+    elif data.get("calendar"):
+        s.append("Ihren Kalender erreiche ich gerade nicht, Sir.")
 
     mails = data.get("mails")
     if mails is None:

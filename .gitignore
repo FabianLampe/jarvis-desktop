@@ -30,6 +30,9 @@ voice_daemon/assets/jarvis_reference.wav
 # Qwen3-TTS-Umgebung
 .venv-qwen/
 
+# Bildgenerierung (mflux, optional)
+.venv-mflux/
+
 # Stimmreferenz samt Transkript (persönlich) — nie einchecken
 voice_daemon/assets/
 

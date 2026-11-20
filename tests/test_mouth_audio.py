@@ -234,3 +234,54 @@ def test_sentence_start_is_slower_than_the_rest():
     ramped = M.apply_tempo(d, sr, rate=0.9, start_rate=0.75)
     assert ramped.size > plain.size                                     # Anfang zusätzlich gedehnt
     assert M.apply_tempo(d, sr, rate=1.0).size == d.size                # 1.0 = unverändert
+
+
+def test_long_numbers_are_not_read_out_but_short_ones_years_dates_and_times_are():
+    s = M.spoken_numbers
+    assert s("Es gibt 900123123 Wohnungen in der Stadt.") == "Es gibt Wohnungen in der Stadt."
+    assert s("Es kostet 1.500 Euro bei 12,5 Prozent.") == "Es kostet Euro bei 12,5 Prozent."
+    assert s("Es sind 42 Leute und 7 Katzen.") == "Es sind 42 Leute und 7 Katzen."
+    assert s("Im Jahr 2026 am 01.11.2026 um 14:30 Uhr.") == "Im Jahr 2026 am 1. November 2026 um 14 Uhr 30."
+    assert s("Prüfen Sie 192.168.0.1 im Router.") == "Prüfen Sie die IP-Adresse im Router."
+    assert s("Die Adresse lautet 10.0.0.2.") == "Die Adresse lautet."             # „Adresse“ nicht doppeln
+    assert s("Python 3.12 und Code abc123 bleiben.") == "Python 3.12 und Code abc123 bleiben."
+
+
+def test_numbers_are_filtered_for_the_voice_but_the_caption_keeps_them(monkeypatch):
+    m = mouth(monkeypatch)
+    spoken = []
+    m._qwen = type("Worker", (), {"synth": lambda self, text, *a: (spoken.append(text) or (sine(0.5), 24000))})()
+    m._synth_qwen = M.Mouth._synth_qwen.__get__(m)
+    captions = []
+    m.say("Es gibt 900123123 Wohnungen.", on_sentence=captions.append)
+    assert captions == ["Es gibt 900123123 Wohnungen."]
+    assert "900123123" not in " ".join(spoken) and "Wohnungen" in " ".join(spoken)
+
+
+def test_one_failing_sentence_does_not_silence_the_rest(monkeypatch):
+    m = mouth(monkeypatch)
+    def synth(text):
+        if "kaputt" in text:
+            raise RuntimeError("Qwen lieferte kein Audio")
+        return sine(0.3), 24000
+    m._synth_qwen = synth
+    captions = []
+    m.say("Erster Satz ist gut. Dieser Satz ist kaputt. Dritter Satz kommt trotzdem.", on_sentence=captions.append)
+    assert any("Dritter Satz" in c for c in captions)
+    assert any("kaputt" in c for c in captions)                    # Untertitel bleibt vollständig
+
+
+def test_bare_list_markers_are_not_sent_to_the_voice():
+    assert M.spoken_numbers("1.") == "" and M.spoken_numbers(" 2) ") == ""
+    assert M.spoken_numbers("Am 1. November.") == "Am 1. November."     # Datum bleibt
+    assert M.spoken_numbers("✅") == "" and M.spoken_numbers(" 🗑️ ") == ""
+
+
+def test_dates_and_times_are_spoken_like_a_person_would():
+    s = M.spoken_numbers
+    assert s("Termin angelegt: Jim am 02.11.2026 18:00–20:00.") == "Termin angelegt: Jim am 2. November 2026 18 bis 20 Uhr."
+    assert s("Am 3.11. um 8:30 Uhr.") == "Am 3. November um 8 Uhr 30."
+    assert s("Von 18:00 bis 20:00 Uhr Fitness.") == "Von 18 bis 20 Uhr Fitness."     # kein doppeltes „Uhr“
+    assert s("Start 2026-11-03T08:00:00+01:00.") == "Start 3. November 2026, 8 Uhr."
+    assert s("Um 14.30 Uhr Meeting.") == "Um 14 Uhr 30 Meeting."
+    assert s("Version 1.2.3 und Python 3.12 laufen.") == "Version 1.2.3 und Python 3.12 laufen."   # keine Daten

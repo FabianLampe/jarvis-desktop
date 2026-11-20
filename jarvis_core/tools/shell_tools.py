@@ -12,7 +12,7 @@ from typing import Optional
 
 import psutil
 
-from .paths import in_workspace, is_protected, resolve
+from .paths import find_project_python, in_workspace, is_protected, resolve
 from .process import ProcessRunner, RunResult
 from .registry import (ALLOW, CONFIRM, DENY, Assessment, Tool, ToolContext, ToolError,
                        ToolResult, wrap_untrusted)
@@ -37,6 +37,7 @@ DANGEROUS = {
     "mv", "ln", "defaults", "networksetup", "pmset", "csrutil", "spctl", "tccutil", "security",
     "crontab", "su", "doas", "sudo", "scutil", "dscl", "hdiutil", "mount", "umount", "trash",
     "format", "del", "erase", "rd", "taskkill", "reg", "sc", "diskpart",
+    "ifconfig", "ipconfig", "route", "arp",      # lesende Formen erlaubt network_reader()
 }
 INLINE_CODE_FLAGS = {"python": {"-c"}, "python3": {"-c"}, "node": {"-e", "--eval"},
                      "perl": {"-e"}, "ruby": {"-e"}, "osascript": {"-e"}, "php": {"-r"},
@@ -120,6 +121,29 @@ def _unwrap(argv: list[str]) -> list[str]:
     return argv
 
 
+_IFACE = re.compile(r"^[a-z]+\d*$")
+
+
+def network_reader(name: str, args: list[str]) -> bool:
+    """Rein lesende Netzwerkabfragen (macOS). Einstellen braucht andere Unterbefehle bzw. Root
+    und bleibt bestätigungspflichtig: networksetup -set…, ifconfig en0 down, route add …"""
+    first = args[0] if args else ""
+    if name == "ifconfig":
+        return (all(a in ("-a", "-l", "-u", "-d", "-v", "-L") for a in args)
+                or (len(args) == 1 and bool(_IFACE.match(first))))
+    if name == "ipconfig":
+        return first in ("getifaddr", "getpacket", "getv6packet", "getsummary", "getoption", "ifcount", "getra")
+    if name == "networksetup":
+        return len(args) <= 2 and first.lower().startswith(("-get", "-list"))
+    if name == "scutil":
+        return args in (["--dns"], ["--proxy"], ["--nwi"])
+    if name == "route":
+        return [a for a in args if a != "-n"][:1] == ["get"]
+    if name == "arp":
+        return bool(args) and all(a in ("-a", "-n", "-an", "-na", "-l") for a in args)
+    return name in ("netstat", "dig", "host", "nslookup", "ping", "traceroute")
+
+
 def _norm_name(argv0: str) -> str:
     name = Path(argv0).name.lower().removesuffix(".exe")
     return re.sub(r"[\d.]+$", "", name) or name        # python3.12 → python, node22 → node
@@ -159,6 +183,8 @@ def classify_argv(ctx: ToolContext, argv: list[str], cwd: Path, env: Optional[di
     if inner is not argv and Path(inner[0]).name.lower() == "sudo":
         return Assessment(CONFIRM, f"ADMINISTRATOR-BEFEHL: {shown}")
     name = _norm_name(inner[0])
+    if inner is argv and network_reader(name, inner[1:]) and not _outside_paths(ctx, inner, cwd):
+        return Assessment(ALLOW)
     if name in DANGEROUS or name.startswith("mkfs"):
         return Assessment(CONFIRM, f"Riskanter Befehl: {shown}")
     flags = INLINE_CODE_FLAGS.get(name, set()) | ({"-p", "--print"} if name == "node" else set())
@@ -349,6 +375,8 @@ def _script_argv(script: Path, a: dict) -> list[str]:
             interp = []
         else:
             raise ToolError(f"Unbekannter Skripttyp {script.suffix or '(ohne Endung)'} und nicht ausführbar")
+    if script.suffix.lower() == ".py" and (venv := find_project_python(script)) is not None:
+        interp = [str(venv)]                 # Projekt mit eigener .venv: deren Pakete benutzen
     extra = a.get("args") or []
     if not isinstance(extra, list):
         raise ToolError("args muss eine Liste sein")
@@ -438,7 +466,10 @@ def tools() -> list[Tool]:
     S = {"type": "string"}
     return [
         Tool("run_command", "terminal",
-             "Führt ein Programm OHNE Shell aus. argv = Liste, z. B. [\"ls\",\"-la\"]. Liefert Rückgabecode, Ausgabe, Fehlerausgabe.",
+             "Führt ein Programm OHNE Shell aus. argv = Liste, z. B. [\"ls\",\"-la\"]. Liefert Rückgabecode, Ausgabe, Fehlerausgabe. "
+             "Rechner ist ein Mac (macOS, kein Linux: kein `ip`). Netzwerk: [\"networksetup\",\"-getinfo\",\"Wi-Fi\"], "
+             "[\"ipconfig\",\"getsummary\",\"en0\"], [\"ifconfig\",\"en0\"], [\"scutil\",\"--dns\"], [\"netstat\",\"-rn\"], "
+             "[\"ping\",\"-c\",\"4\",\"host\"].",
              {"argv": {"type": "array", "items": S, "description": "Programm und Argumente"},
               "cwd": {**S, "description": "Arbeitsverzeichnis (Standard: Arbeitsordner)"},
               "env": {"type": "object", "description": "Zusätzliche Umgebungsvariablen"},

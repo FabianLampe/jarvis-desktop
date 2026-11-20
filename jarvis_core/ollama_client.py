@@ -291,11 +291,16 @@ class OllamaClient:
             log.warning("Entladen von %s fehlgeschlagen: %s", model, exc)
             return False
 
-    def preload(self, model: str, keep_alive: str | int = "30m") -> bool:
-        """Lädt ein Modell in den VRAM, ohne eine Antwort zu erzeugen. Best effort."""
+    def preload(self, model: str, keep_alive: str | int = "30m", num_ctx: int | None = None) -> bool:
+        """Lädt ein Modell in den VRAM, ohne eine Antwort zu erzeugen. Best effort.
+
+        num_ctx muss dem späteren Chat entsprechen — sonst lädt Ollama beim ersten Aufruf neu.
+        """
+        payload: dict[str, Any] = {"model": model, "messages": [], "keep_alive": keep_alive}
+        if num_ctx:
+            payload["options"] = {"num_ctx": num_ctx}
         try:
-            self._post("/api/chat", {"model": model, "messages": [],
-                                     "keep_alive": keep_alive}, model_for_404=model).close()
+            self._post("/api/chat", payload, model_for_404=model).close()
             return True
         except OllamaError as exc:
             log.warning("Vorladen von %s fehlgeschlagen: %s", model, exc)

@@ -34,6 +34,8 @@ import soundfile as sf
 
 from jarvis_core.platform import current as current_platform
 
+from .audio_lock import close_stream, start_stream
+
 log = logging.getLogger("daemon.mouth")
 
 _SENTENCE_END = re.compile(r"(?<=[.!?…:])\s+")
@@ -78,6 +80,72 @@ def speakable(text: str, max_chars: int) -> str:
         cut = cut[:cut.rfind(" ")] if " " in cut else cut
         text = cut + " … Den Rest zeige ich im Panel, Sir."
     return text
+
+
+_NUMBERS = re.compile(
+    r"(?<![\w.,:])(?:"
+    r"(?P<ip>\d{1,3}(?:\.\d{1,3}){3}(?:/\d{1,2})?)"                 # IPv4, optional /24
+    r"|(?P<keep>\d{4}-\d{2}-\d{2}"                                  # ISO-Datum
+    r"|\d{1,2}\.\d{1,2}\.(?:\d{2}(?:\d{2})?)?"                     # 1.11. / 01.11.2026
+    r"|\d{1,2}:\d{2}(?::\d{2})?)"                                   # Uhrzeit
+    r"|(?P<long>\d{1,3}(?:[.  ]\d{3})+(?:,\d+)?|\d{3,}(?:[.,]\d+)?)"   # 1.500 / 900123123
+    r")(?![\w])")
+
+
+_MONTHS = ("Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August",
+           "September", "Oktober", "November", "Dezember")
+_CLOCK = r"(\d{1,2})[:.](\d{2})(?::\d{2})?"
+
+
+def _say_clock(h: str, m: str) -> str:
+    return f"{int(h)} Uhr" if int(m) == 0 else f"{int(h)} Uhr {int(m)}"
+
+
+def _say_range(m: re.Match) -> str:
+    h1, m1, h2, m2 = m.group(1), m.group(2), m.group(3), m.group(4)
+    if int(m1) == 0 and int(m2) == 0:
+        return f"{int(h1)} bis {int(h2)} Uhr"
+    return f"{_say_clock(h1, m1)} bis {_say_clock(h2, m2)}"
+
+
+def _say_date(day: str, month: str, year: str = "") -> str:
+    if not 1 <= int(month) <= 12 or not 1 <= int(day) <= 31:
+        return f"{day}.{month}.{year}"
+    return f"{int(day)}. {_MONTHS[int(month) - 1]}" + (f" {year if len(year) == 4 else '20' + year}" if year else "")
+
+
+def spoken_dates_and_times(text: str) -> str:
+    """„03.11.2026 18:00–20:00“ → „3. November 2026 18 bis 20 Uhr“ (nur fürs Sprechen)."""
+    text = re.sub(r"(?<![\w.])(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::\d{2})?(?:[+-]\d{2}:\d{2}|Z)?)?(?![\w])",
+                  lambda m: _say_date(m.group(3), m.group(2), m.group(1))
+                  + (f", {_say_clock(m.group(4), m.group(5))}" if m.group(4) else ""), text)
+    text = re.sub(rf"(?<![\w.:]){_CLOCK}\s*(?:–|-|bis)\s*{_CLOCK}(?:\s*Uhr)?(?![\w])", _say_range, text)
+    text = re.sub(r"(?<![\w.:])(\d{1,2}):(\d{2})(?::\d{2})?(?:\s*Uhr)?(?![\w])",
+                  lambda m: _say_clock(m.group(1), m.group(2)), text)
+    text = re.sub(r"(?<![\w.:])(\d{1,2})\.(\d{2})\s*Uhr(?![\w])", lambda m: _say_clock(m.group(1), m.group(2)), text)
+    return re.sub(r"(?<![\w.])(\d{1,2})\.(\d{1,2})\.(\d{4}|\d{2}(?![\d]))?(?![\w])",
+                  lambda m: _say_date(m.group(1), m.group(2), m.group(3) or ""), text)
+
+
+def spoken_numbers(text: str) -> str:
+    """Nur fürs Sprechen (Chat und Untertitel behalten die Zahl): höchstens zweistellige Zahlen,
+    Jahreszahlen, Datum und Uhrzeit bleiben; IP-Adressen heißen „die IP-Adresse“, längere Zahlen
+    entfallen — „900123123 Wohnungen“ wird zu „Wohnungen“."""
+    def repl(m: re.Match) -> str:
+        if m.group("ip"):                                   # „Die Adresse lautet …“ nicht doppeln
+            return "" if "adresse" in m.string[max(0, m.start() - 30):m.start()].lower() else "die IP-Adresse"
+        if m.group("keep"):
+            return m.group(0)
+        number = m.group("long")
+        return number if re.fullmatch(r"(?:1[89]|20|21)\d\d", number) else ""   # Jahreszahl
+    if re.fullmatch(r"\s*(?:\d{1,2}|[a-zA-Z])[.)]\s*", text):    # nur „1.“ / „a)“ einer Aufzählung
+        return ""
+    if not re.search(r"[^\W_]", text):                            # nur Emoji/Satzzeichen („✅“, „🗑️“)
+        return ""
+    text = spoken_dates_and_times(text)
+    text = _NUMBERS.sub(repl, text)
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    return re.sub(r"\s{2,}", " ", text).strip()
 
 
 def trim_tail(data: np.ndarray, sr: int, keep_s: float = 0.18, max_cut_s: float = 0.8) -> np.ndarray:
@@ -225,9 +293,9 @@ class _Player:
         self._buf: "collections.deque[np.ndarray]" = collections.deque()
         self._lock = threading.Lock()
         self.queued = 0                         # Samples im Puffer
-        self._stream = sd.OutputStream(samplerate=sr, channels=1, dtype="float32", device=device,
-                                       latency="high", blocksize=self.BLOCK, callback=self._cb)
-        self._stream.start()
+        self._stream = start_stream(lambda: sd.OutputStream(
+            samplerate=sr, channels=1, dtype="float32", device=device,
+            latency="high", blocksize=self.BLOCK, callback=self._cb))
 
     def _cb(self, outdata, frames, t, status) -> None:
         out = outdata[:, 0]
@@ -265,10 +333,7 @@ class _Player:
             time.sleep(0.01)
 
     def close(self) -> None:
-        try:
-            self._stream.stop()
-        finally:
-            self._stream.close()
+        close_stream(self._stream)
 
 
 class QwenWorker:
@@ -410,6 +475,9 @@ class Mouth:
         log.info("XTTS bereit (%s) — Referenz: %s", dev, self.speaker_wav)
 
     def _synth_xtts(self, text: str):
+        text = spoken_numbers(text)
+        if not text:                                    # nur eine lange Zahl: kurz schweigen statt raten
+            return np.zeros(2400, dtype=np.float32), 24000
         self.load_xtts()
         assert self._xtts is not None
         wav = self._xtts.tts(text=text, speaker_wav=self.speaker_wav,
@@ -440,6 +508,9 @@ class Mouth:
         return text
 
     def _synth_qwen(self, text: str):
+        text = spoken_numbers(text)
+        if not text:                                    # nur eine lange Zahl: kurz schweigen statt raten
+            return np.zeros(2400, dtype=np.float32), 24000
         if self._qwen is None:
             self._qwen = QwenWorker(self.qwen_python, self.qwen_model)
         data, sr = self._qwen.synth(text, self.qwen_ref_audio, self._qwen_reference_text(), self.qwen_language)
@@ -489,6 +560,9 @@ class Mouth:
 
     def _synth_voicebox(self, text: str):
         """POST /generate/stream → WAV (synchron). Wirft bei Fehlern; der Aufrufer fällt zurück."""
+        text = spoken_numbers(text)
+        if not text:                                    # nur eine lange Zahl: kurz schweigen statt raten
+            return np.zeros(2400, dtype=np.float32), 24000
         import requests
         payload: dict = {"text": text, "profile_id": self.voicebox_profile_id(), "language": self.language}
         if self.voicebox_engine:
@@ -541,7 +615,8 @@ class Mouth:
             self.load_xtts()
             synth = self._synth_xtts
         # (Satztext, Audio) — der Text wird erst beim Abspielen angezeigt
-        audio_q: "queue.Queue[Optional[tuple[str, np.ndarray, int]]]" = queue.Queue(maxsize=4)
+        # Audio None = Satz übersprungen (Synthese fehlgeschlagen), nur der Untertitel erscheint
+        audio_q: "queue.Queue[Optional[tuple[str, Optional[np.ndarray], int]]]" = queue.Queue(maxsize=4)
 
         def producer() -> None:
             try:
@@ -551,7 +626,12 @@ class Mouth:
                     if self._abort:
                         break
                     t0 = time.monotonic()
-                    data, sr = synth(c)
+                    try:
+                        data, sr = synth(c)
+                    except Exception as exc:  # noqa: BLE001 — ein Satz darf nicht den Rest der Antwort kosten
+                        log.warning("TTS-Happen übersprungen (%s): %r", exc, c[:120])
+                        audio_q.put((c, None, 0))           # Untertitel trotzdem zeigen
+                        continue
                     log.debug("TTS-Happen: %.1f s Audio in %.1f s gerechnet",
                               data.size / sr, time.monotonic() - t0)
                     audio_q.put((c, data, sr))
@@ -568,6 +648,10 @@ class Mouth:
             if self._abort:
                 continue  # Queue leeren, Producer beendet sich selbst
             sentence, data, sr = item
+            if data is None:
+                if on_sentence is not None:
+                    _emit_sentence(on_sentence, sentence, 0.0)
+                continue
             if on_sentence is not None:
                 _emit_sentence(on_sentence, sentence, data.size / sr)
             self._play(data, sr, on_amplitude)
@@ -703,6 +787,9 @@ class Mouth:
 
     def _synth_with_fallback(self, clean: str):
         """edge → (offline/Fehler) → Systemstimme. Gibt (Audio, Samplerate) oder (None, 0)."""
+        clean = spoken_numbers(clean)
+        if not clean:
+            return None, 0
         if self.engine in ("edge", "voicebox", "qwen"):             # voicebox ausgefallen ⇒ edge, dann Systemstimme
             try:
                 mp3 = asyncio.run(self._synth(clean))

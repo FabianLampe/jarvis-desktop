@@ -32,9 +32,31 @@ def test_timeout_reported_honestly(tmp_path):
 
 
 def test_claim_without_tool_is_corrected(tmp_path):
-    rt = runtime(tmp_path, {"content": "Ich habe die Datei angelegt, Sir."})
+    # Auch nach der Zurückweisung (NO_TOOL_NUDGE) bleibt das Modell bei seiner Behauptung.
+    rt = runtime(tmp_path, {"content": "Ich habe die Datei angelegt, Sir."},
+                 {"content": "Ich habe die Datei wirklich angelegt, Sir."})
     done = run(rt, "Lege eine Datei an")[-1]
     assert not done["ok"] and "nichts passiert" in done["text"]
+    assert len(rt.agent.client.calls) == 2
+
+
+def test_answer_without_tool_call_is_rejected_once_then_tool_runs(tmp_path):
+    """Das Modell antwortet aus dem Kopf (erfundene Daten) → Zurückweisung → Werkzeug → belegte Antwort."""
+    from jarvis_core.toolagent import NO_TOOL_NUDGE
+    rt = runtime(tmp_path, {"content": "In der Datei steht: Butter."},
+                 {"content": "", "tool_calls": [call("read_file", path="einkauf.txt")]},
+                 {"content": "In der Datei steht Milch, Sir."})
+    (rt.ctx.workspace / "einkauf.txt").write_text("Milch", encoding="utf-8")
+    events = run(rt, "Lies die Datei einkauf.txt")
+    assert events[-1]["ok"] and "Milch" in events[-1]["text"] and "Butter" not in events[-1]["text"]
+    messages = rt.agent.client.calls[1][1]            # dieselbe, weiterwachsende Nachrichtenliste
+    assert messages.count({"role": "user", "content": NO_TOOL_NUDGE}) == 1
+
+
+def test_nudge_happens_only_once_and_question_back_is_kept(tmp_path):
+    rt = runtime(tmp_path, {"content": "Welche Datei meinen Sie, Sir?"}, {"content": "Welche Datei soll ich lesen, Sir?"})
+    done = run(rt, "Lies die Datei")[-1]
+    assert done["text"] == "Welche Datei soll ich lesen, Sir?" and len(rt.agent.client.calls) == 2
 
 
 def test_delete_needs_exact_confirmation(tmp_path):

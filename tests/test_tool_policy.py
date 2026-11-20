@@ -76,3 +76,21 @@ def test_open_app_risky_files(tmp_path):
     assert assess(rt, "open_app", target="Safari").level == ALLOW
     assert assess(rt, "open_app", target="x.command").level == CONFIRM
     assert not rt.registry.execute(rt.ctx, "open_app", {"target": "file:///etc/passwd"}, 100).ok
+
+
+def test_network_queries_run_without_confirmation_even_after_foreign_output(tmp_path):
+    rt = runtime(tmp_path)
+    rt.ctx.tainted = True                    # z. B. nach einem fehlgeschlagenen ersten Befehl
+    for argv in (["ifconfig"], ["ifconfig", "en0"], ["networksetup", "-getinfo", "Wi-Fi"],
+                 ["networksetup", "-listallhardwareports"], ["ipconfig", "getsummary", "en0"],
+                 ["scutil", "--dns"], ["netstat", "-rn"], ["route", "-n", "get", "default"],
+                 ["arp", "-a"], ["ping", "-c", "4", "1.1.1.1"], ["dig", "example.org"]):
+        assert assess(rt, "run_command", argv=argv).level == ALLOW, argv
+
+
+def test_network_changes_still_need_confirmation(tmp_path):
+    rt = runtime(tmp_path)
+    for argv in (["networksetup", "-setairportpower", "en0", "off"], ["networksetup", "-setdnsservers", "Wi-Fi", "1.1.1.1"],
+                 ["ifconfig", "en0", "down"], ["ipconfig", "set", "en0", "DHCP"], ["scutil", "--set", "HostName", "x"],
+                 ["route", "add", "default", "10.0.0.1"], ["arp", "-d", "10.0.0.1"], ["sudo", "ifconfig"]):
+        assert assess(rt, "run_command", argv=argv).level == CONFIRM, argv

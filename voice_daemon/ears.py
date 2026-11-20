@@ -17,6 +17,8 @@ from typing import Callable, Optional
 import numpy as np
 import sounddevice as sd
 
+from .audio_lock import PA_LOCK, opened_stream
+
 log = logging.getLogger("daemon.ears")
 
 SR = 16000          # openWakeWord + Whisper erwarten 16 kHz
@@ -159,9 +161,9 @@ class Ears:
         model, key = self._model, self._model_key
         assert model is not None and key is not None, "start() lädt das Wake-Word-Modell"
 
-        with sd.InputStream(samplerate=SR, channels=1, dtype="int16",
-                            blocksize=FRAME, device=device,
-                            callback=self._audio_cb):
+        with opened_stream(lambda: sd.InputStream(samplerate=SR, channels=1, dtype="int16",
+                                                  blocksize=FRAME, device=device,
+                                                  callback=self._audio_cb)):
             log.info("Mikrofon offen — sage „Hey Jarvis“ …")
             while not self._stop.is_set() and not self._muted.is_set():
                 try:
@@ -211,8 +213,10 @@ class Ears:
         self.on_listen_start()
         if self.cfg.get("beep", True):
             self._beep()
-            time.sleep(0.35)          # Beep (0,09 s) samt Ausklang abwarten, sonst zählt er als „Sprache“
-        self._drain()
+            time.sleep(0.35)          # Beep (0,09 s) samt Ausklang abwarten
+        # Nichts verwerfen: Was direkt nach „Hey Jarvis“ gesagt wurde, steht schon in der Queue
+        # („Hey Jarvis, morgen um …“). Der Beep belegt höchstens 2 Frames und zählt nicht als
+        # Sprache — dafür braucht es ≥ 3 laute Frames in Folge.
 
         max_frames = int(float(self.cfg["max_utterance_s"]) * SR / FRAME)
         silence_frames = int(float(self.cfg["silence_after_s"]) * SR / FRAME)
@@ -276,7 +280,8 @@ class Ears:
             t = np.linspace(0, 0.09, int(0.09 * 24000), endpoint=False)
             tone = (0.18 * np.sin(2 * np.pi * 880 * t) *
                     np.hanning(t.size)).astype(np.float32)
-            sd.play(tone, samplerate=24000,
-                    device=self.cfg.get("output_device"), blocking=False)
+            with PA_LOCK:     # sd.play öffnet einen Stream — nie parallel zum Mikrofon-Stopp
+                sd.play(tone, samplerate=24000,
+                        device=self.cfg.get("output_device"), blocking=False)
         except Exception as exc:
             log.debug("Beep fehlgeschlagen: %s", exc)

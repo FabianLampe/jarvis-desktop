@@ -7,8 +7,9 @@
 #   ./start_jarvis_mac.sh --voice-ref "Jarvis voice.mp3"   Referenz-WAV für die Jarvis-Stimme erzeugen
 #   ./start_jarvis_mac.sh --mic        Mikrofon testen (Berechtigung, Pegel)
 #   ./start_jarvis_mac.sh --check      Umgebung und Modelle prüfen
-#   ./start_jarvis_mac.sh              Desktop-App starten
-#   ./start_jarvis_mac.sh --daemon     Sprach-Daemon starten (zweites Terminal)
+#   ./start_jarvis_mac.sh              Desktop-App + Sprach-Daemon gemeinsam starten (Daemon endet mit der App)
+#   ./start_jarvis_mac.sh --app        nur die Desktop-App
+#   ./start_jarvis_mac.sh --daemon     nur den Sprach-Daemon
 #   ./start_jarvis_mac.sh --cli "Text" Auftrag ohne Oberfläche ausführen
 #   weitere Argumente (--profile mac, --debug) gehen an die App
 set -euo pipefail
@@ -50,8 +51,19 @@ case "${1:-}" in
   --check)  exec "$PY" -m jarvis_core.doctor ;;
   --daemon) shift; exec "$PY" -m voice_daemon.main "$@" ;;
   --cli)    shift; exec "$PY" -m jarvis_core.cli "$@" ;;
-  *)
+  --app)
+    shift
     [ -x "$PY" ] || { echo "Zuerst: ./start_jarvis_mac.sh --setup"; exit 1; }
     exec "$PY" -m jarvis_app.main "$@"
+    ;;
+  *)
+    [ -x "$PY" ] || { echo "Zuerst: ./start_jarvis_mac.sh --setup"; exit 1; }
+    # Daemon im Hintergrund; läuft schon einer, beendet sich der neue sofort (Singleton).
+    "$PY" -m voice_daemon.main &
+    DAEMON=$!
+    trap 'kill "$DAEMON" 2>/dev/null || true' EXIT
+    # Kein exec: das Skript muss den Daemon nach dem App-Ende aufräumen.
+    # Ein Jarvis-Neustart (os.execv) behält die PID, das Warten läuft also weiter.
+    "$PY" -m jarvis_app.main "$@"
     ;;
 esac

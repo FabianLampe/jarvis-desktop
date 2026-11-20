@@ -5,8 +5,9 @@ import sys
 import secrets
 import time
 
+from . import mac_script as ms
 from .extension_utils import S, confirm, result
-from .registry import Tool, ToolError
+from .registry import ALLOW, CONFIRM, Assessment, Tool, ToolError, ToolResult
 
 
 class MacUI:
@@ -20,7 +21,7 @@ class MacUI:
         except ImportError:
             raise ToolError("Mac-UI-Pakete fehlen: pip install -r requirements-tools.txt") from None
         if not AX.AXIsProcessTrusted():
-            raise ToolError("Bedienungshilfen-Zugriff fehlt: Systemeinstellungen → Datenschutz & Sicherheit → Bedienungshilfen; startendes Terminal/Jarvis freigeben")
+            raise ToolError(ms.ACCESSIBILITY_HELP)
         # Nur das systemweite AX-Objekt setzt den Timeout für alle Elemente dieses Prozesses.
         AX.AXUIElementSetMessagingTimeout(AX.AXUIElementCreateSystemWide(), 2.0)
         self.ax, self.apps, self.q = AX, AppKit, Quartz
@@ -141,7 +142,8 @@ class MacUI:
 
 def controller(ctx):
     if not (ctx.cfg.extensions.get("mac_ui") or {}).get("enabled"):
-        raise ToolError("Mac-UI deaktiviert; extensions.mac_ui.enabled aktivieren und Bedienungshilfen freigeben")
+        raise ToolError("Mac-App-Steuerung ist ausgeschaltet; in config.yaml extensions.mac_ui.enabled: true setzen "
+                        "und unter Systemeinstellungen → Datenschutz & Sicherheit → Bedienungshilfen das Terminal freigeben")
     # Element-IDs sind auf eine Aufgabe beschränkt, nie zwischen Aufgaben geteilt.
     if "mac_ui" not in ctx.services:
         ctx.services["mac_ui"] = MacUI()
@@ -160,6 +162,77 @@ def assess_action(ctx, a):
     return confirm("MAC-APP BEDIENEN " + label)(ctx, a)
 
 
+# ----------------------------------------------------- Text in eine App tippen
+
+# Fest im Code: App-Name und Text kommen ausschließlich als argv an, nie im Skripttext.
+TYPE_SCRIPT = """on run argv
+    set appName to item 1 of argv
+    set theText to item 2 of argv
+    tell application appName to activate
+    delay 0.7
+    set wantId to id of application appName
+    tell application "System Events"
+        set frontId to bundle identifier of first application process whose frontmost is true
+        if frontId is not wantId then error "FRONT_MISMATCH"
+        keystroke theText
+    end tell
+end run"""
+MAX_TYPE_CHARS = 2000
+# Hier würde getippter Text Befehle auslösen oder Zugangsdaten betreffen: immer Rückfrage.
+SENSITIVE_APPS = {"terminal", "iterm", "iterm2", "warp", "ghostty", "alacritty", "kitty", "hyper", "wezterm",
+                  "systemeinstellungen", "system settings", "schlüsselbundverwaltung", "keychain access",
+                  "passwörter", "passwords", "visual studio code", "cursor", "xcode", "pycharm", "pycharm ce", "zed",
+                  "sublime text", "skripteditor", "script editor", "automator", "kurzbefehle", "shortcuts"}
+
+
+# Deutsche Bezeichnungen, die Sir sagt, ↔ Programmname im Ordner Programme.
+APP_ALIASES = {"notizen": "Notes", "kalender": "Calendar", "erinnerungen": "Reminders", "nachrichten": "Messages",
+               "kontakte": "Contacts", "systemeinstellungen": "System Settings", "mail": "Mail", "safari": "Safari",
+               "vorschau": "Preview", "rechner": "Calculator", "karten": "Maps", "musik": "Music",
+               "kurzbefehle": "Shortcuts", "passwörter": "Passwords"}
+
+
+def _installed(name: str):
+    from ..tool_intent import installed_app
+    return installed_app(APP_ALIASES.get(name.casefold(), name))
+
+
+def _type_target(a: dict) -> str:
+    name = str(a.get("app", "")).strip()
+    if not name or any(c in name for c in "/\\\n\x00") or name.startswith("-"):
+        raise ToolError("Bitte den App-Namen angeben, z. B. Notizen oder TextEdit.")
+    app = _installed(name)
+    if app is None:
+        raise ToolError(f"Eine App „{name[:40]}“ finde ich nicht.")
+    return app
+
+
+def _mac_ui_enabled(ctx) -> bool:
+    return bool((ctx.cfg.extensions.get("mac_ui") or {}).get("enabled"))
+
+
+def app_type_text(ctx, a: dict) -> ToolResult:
+    if not _mac_ui_enabled(ctx):
+        raise ToolError("Mac-App-Steuerung ist ausgeschaltet; in config.yaml extensions.mac_ui.enabled: true setzen.")
+    app = _type_target(a)
+    text = str(a.get("text", ""))
+    if not text or len(text) > MAX_TYPE_CHARS:
+        raise ToolError(f"Der Text muss zwischen 1 und {MAX_TYPE_CHARS} Zeichen lang sein.")
+    ms.osa(TYPE_SCRIPT, app, text, app=app, timeout=30)
+    return ToolResult(True, f"In {app} getippt ({len(text)} Zeichen).")
+
+
+def assess_type_text(ctx, a: dict) -> Assessment:
+    app = _type_target(a)
+    text = str(a.get("text", ""))
+    preview = text[:80].replace("\n", " ") + ("…" if len(text) > 80 else "")
+    if app.casefold() in SENSITIVE_APPS:
+        return Assessment(CONFIRM, f"TEXT IN {app.upper()} TIPPEN (hier können Eingaben Befehle auslösen): „{preview}“")
+    if ctx.tainted:
+        return Assessment(CONFIRM, f"TEXT IN {app.upper()} TIPPEN (nach Lesen fremder Inhalte): „{preview}“")
+    return Assessment(ALLOW)
+
+
 def tools():
     return [
         Tool("mac_ui_snapshot", "mac_ui", "Laufende Mac-App/Fensterelemente mit kurzlebigen IDs lesen; app leer = Vordergrund.",
@@ -167,4 +240,9 @@ def tools():
         Tool("mac_ui_action", "mac_ui", "Mac-Element aus frischem Snapshot klicken/beschreiben oder Tastenkürzel in derselben Vordergrund-App senden.",
              {"action": {**S, "enum": ["click", "type", "key"]}, "id": S, "text": S, "key": S},
              ("action",), lambda c, a: result(controller(c).action(a)), assess_action),
+        Tool("app_type_text", "mac_ui",
+             "Aktiviert eine Mac-App (z. B. Notizen, TextEdit, Pages) und tippt Text hinein, als würde Sir tippen. "
+             "Für einfaches Schreiben in eine App; für Klicks und Menüs mac_ui_snapshot/mac_ui_action.",
+             {"app": S, "text": S}, ("app", "text"), app_type_text, assess_type_text,
+             announce=lambda a: f"Ich tippe in {str(a.get('app', 'die App'))[:30]}, Sir."),
     ]

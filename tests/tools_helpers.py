@@ -5,7 +5,16 @@ from pathlib import Path
 from jarvis_core import config
 from jarvis_core.runtime import build_runtime
 
-CFG = config.load(str(Path(__file__).parent.parent / "config.yaml"), "mac")
+import dataclasses
+
+_LOADED = config.load(str(Path(__file__).parent.parent / "config.yaml"), "mac")
+# Bestehende Tests zählen Modellaufrufe: dort wählt nur die Stichwortliste die Werkzeuge.
+# Die Modell-Weiche (tools.router: auto) hat eigene Tests in test_router_plan.py.
+# Der Wächter (proactive) startet in Tests nie von selbst; die Herstellerliste wird nie geladen.
+_BASE = dataclasses.replace(_LOADED, proactive=dataclasses.replace(_LOADED.proactive, enabled=False),
+                            network=dataclasses.replace(_LOADED.network, vendor_lookup=False))
+CFG = dataclasses.replace(_BASE, tools=dataclasses.replace(_BASE.tools, router="keywords"))
+CFG_AUTO = dataclasses.replace(_BASE, tools=dataclasses.replace(_BASE.tools, router="auto"))
 
 
 class FakeClient:

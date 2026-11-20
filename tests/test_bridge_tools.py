@@ -59,3 +59,42 @@ def test_cancel_button(tmp_path):
     assert b.cancel() == {"ok": True}
     t.join(8)
     assert not t.is_alive() and time.time() - t0 < 8
+
+
+def _voice_delete(tmp_path, answer):
+    b = make(tmp_path, {"tool_calls": [call("delete_path", path="a.txt")]}, {"content": "Gelöscht, Sir."})
+    (tmp_path / "ws" / "a.txt").write_text("x")
+    t = threading.Thread(target=b._run_stream, args=("s1", "Lösche die Datei a.txt", False, True, True))
+    t.start()
+    assert wait_for(lambda: any("Ja oder nein" in s for s in b._hub.spoken))
+    b._daemon_utterance(answer)
+    t.join(5)
+    return b
+
+
+def test_spoken_yes_confirms_without_starting_a_new_task(tmp_path):
+    b = _voice_delete(tmp_path, "Ja, bitte.")
+    assert not (tmp_path / "ws" / "a.txt").exists()
+    assert any("onConfirmResolved" in c and "true" in c for c in b._window.js_calls)
+    assert b._voice_confirm is None
+
+
+def test_spoken_no_declines_politely(tmp_path):
+    b = _voice_delete(tmp_path, "Nein, lieber nicht.")
+    assert (tmp_path / "ws" / "a.txt").exists()
+    assert any("nicht ausgeführt" in s for s in b._hub.spoken)
+
+
+def test_yes_without_open_question_is_a_normal_message(tmp_path):
+    b = make(tmp_path)
+    sent = []
+    b.send_message = lambda text, **kw: sent.append(text)
+    b._daemon_utterance("Ja")
+    assert sent == ["Ja"]
+
+
+def test_voice_decision_only_takes_clear_answers():
+    from jarvis_app.bridge import voice_decision
+    assert voice_decision("Jarvis, ja mach das") is True and voice_decision("Genau.") is True
+    assert voice_decision("Nein, bis 18 Uhr") is False and voice_decision("Lieber nicht") is False
+    assert voice_decision("Janina anrufen") is None and voice_decision("Wie spät ist es?") is None

@@ -45,6 +45,7 @@
       '<b id="startup-percent">0<span>%</span></b></div>' +
       '<div id="startup-progress" role="progressbar" aria-label="Abgeschlossene Startprüfungen" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div></div></div>' +
       '<div id="startup-steps" aria-live="polite"></div>' +
+      '<div id="startup-agenda" aria-label="Tagesübersicht"></div>' +
       '<div id="startup-footer">LOKALE SYSTEMPRÜFUNG</div></section>' +
       '<footer class="startup-foot"><span id="startup-music">SOUNDTRACK / DATEI WÄHLEN</span>' +
       '<div class="startup-actions"><button class="ctl-btn" id="startup-replay" hidden>Noch einmal</button>' +
@@ -136,6 +137,59 @@
       m.playing ? '♫ ' + (m.title || m.file) : m.configured ? 'SOUNDTRACK / ' + m.file : 'SOUNDTRACK / DATEI WÄHLEN';
   };
 
+  function el(tag, cls, text) {
+    var node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  function agendaCard(label, rows, i) {
+    var card = el('div', 'agenda-card');
+    card.style.setProperty('--card-delay', (0.15 + i * 0.22) + 's');
+    card.appendChild(el('span', 'hud-label', label));
+    rows.forEach(function (row) { card.appendChild(row); });
+    return card;
+  }
+
+  // Tagesübersicht ersetzt nach dem Start die Prüfliste, solange Jarvis das Briefing spricht.
+  Startup.prototype.briefing = function (data) {
+    var agenda = $('startup-agenda');
+    agenda.replaceChildren();
+    var events = data.events;
+    var rows = events === null || events === undefined
+      ? [el('span', 'agenda-empty', data.calendar ? 'Kalender nicht erreichbar' : 'Google Kalender nicht verbunden')]
+      : events.length ? events.slice(0, 5).map(function (e) {
+          var row = el('div', 'agenda-event');
+          row.appendChild(el('b', null, e.time || 'GANZTÄGIG'));
+          row.appendChild(el('span', null, e.title));
+          return row;
+        }) : [el('span', 'agenda-empty', 'Keine Termine heute')];
+    if (events && events.length > 5) rows.push(el('span', 'agenda-empty', '+ ' + (events.length - 5) + ' weitere im Kalender'));
+    agenda.appendChild(agendaCard('HEUTE' + (events && events.length ? ' · ' + events.length : ''), rows, 0));
+    var w = data.weather;
+    agenda.appendChild(agendaCard('WETTER' + (w && w.ort ? ' · ' + w.ort.toUpperCase() : ''), w ? [
+      el('strong', null, w.temp_now + '°'),
+      el('span', null, (w.text || '') + ' · ' + w.temp_max + '° / ' + w.temp_min + '°')
+    ] : [el('span', 'agenda-empty', 'Nicht verfügbar')], 1));
+    var mails = data.mails;
+    agenda.appendChild(agendaCard('POSTFACH', mails ? [
+      el('strong', null, String(mails.length)),
+      el('span', null, mails.length ? 'neue Nachrichten' : 'keine neuen Nachrichten')
+    ] : [el('span', 'agenda-empty', 'Gmail nicht verbunden')], 2));
+    this.hasBriefing = true;
+  };
+
+  // Gesprochener Satz als Untertitel, solange der Startbildschirm offen ist.
+  Startup.prototype.caption = function (text) {
+    if (this.overlay.classList.contains('hidden') || !this.lastState || this.lastState.phase !== 'ready') return;
+    var title = $('startup-title');
+    title.textContent = text;
+    title.classList.remove('is-caption');
+    void title.offsetWidth;
+    title.classList.add('is-caption');
+  };
+
   Startup.prototype.update = function (state) {
     this.lastState = state;
     this.music(state.music);
@@ -190,17 +244,22 @@
       this.overlay.classList.remove('startup-ready', 'shutting-down');
       this.stepRows.clear();
       $('startup-steps').replaceChildren();
+      $('startup-agenda').replaceChildren();
+      $('startup-title').classList.remove('is-caption');
+      this.hasBriefing = false;
+      this.spoke = false;
       this.show();
       this.mainOrb.setState('boot');
     }
     this.overlay.classList.toggle('shutting-down', this.shutdown);
     var ready = state.phase === 'ready';
     this.overlay.classList.toggle('startup-ready', ready);
+    this.overlay.classList.toggle('startup-briefing', ready && !!this.hasBriefing && !this.shutdown);
     if (this.hud) this.hud.setState(state);
     if (this.orb) this.orb.setState(this.shutdown ? 'sleep' : ready ? 'idle' : 'boot');
     $('startup-mode').textContent = this.shutdown ? 'NEUSTART' : state.mode === 'wake' ? 'AUFWACHEN' : 'SYSTEMSTART';
     $('startup-kicker').textContent = this.shutdown ? 'SYSTEM REBOOT' : state.mode === 'wake' ? 'WAKE-UP PROTOCOL' : 'SYSTEM INITIALIZATION';
-    $('startup-title').textContent = this.shutdown ? 'Bis gleich, Sir.' : ready ?
+    if (!(ready && $('startup-title').classList.contains('is-caption'))) $('startup-title').textContent = this.shutdown ? 'Bis gleich, Sir.' : ready ?
       (state.warnings ? 'Für Sie da. Mit Einschränkungen.' : 'Für Sie bereit, Sir.') :
       state.mode === 'wake' ? 'Zeit, aufzuwachen, Sir.' : 'Willkommen zurück, Sir.';
     $('startup-reactor-label').textContent = this.shutdown ? 'SYSTEM WIRD BEENDET' : ready ?
@@ -240,18 +299,27 @@
     var voice = (state.steps || []).find(function (s) { return s.id === 'voice' || s.label === 'Stimme'; });
     $('startup-voice').textContent = !voice || voice.state === 'pending' ? 'WARTET' :
       voice.state === 'ok' ? 'VERBUNDEN' : voice.state === 'loading' ? 'VERBINDET …' : 'NICHT VERBUNDEN';
-    $('startup-detail').textContent = this.shutdown ? 'Jarvis beendet laufende Aktionen …' : done + ' / ' + (state.steps || []).length + ' PRÜFUNGEN ABGESCHLOSSEN';
-    $('startup-close').textContent = ready ? 'ZUM TAGESBRIEFING →' : 'Im Hintergrund';
+    $('startup-detail').textContent = this.shutdown ? 'Jarvis beendet laufende Aktionen …' :
+      ready && this.hasBriefing ? (state.speaking ? 'TAGESBRIEFING LÄUFT …' : 'TAGESBRIEFING') :
+      done + ' / ' + (state.steps || []).length + ' PRÜFUNGEN ABGESCHLOSSEN';
+    $('startup-close').textContent = ready ? 'ZUM CHAT →' : 'Im Hintergrund';
     $('startup-cancel').classList.toggle('hidden', ready);
     $('startup-replay').hidden = !(window.JARVIS_PREVIEW && ready);
     this.chip.textContent = ready ? 'START ABGESCHLOSSEN' : this.shutdown ? 'JARVIS STARTET NEU' : 'SYSTEMSTART · ' + pct + '%';
     this.chip.classList.remove('hidden');
     if (ready) {
       this.mainOrb.setState('idle');
-      // The demo stays reviewable and can be replayed. Live operation returns to the briefing.
-      if (!this.timer && !window.JARVIS_PREVIEW) this.timer = setTimeout(function () {
-        this.hide(); this.chip.classList.add('hidden'); this.timer = null;
-      }.bind(this), Math.max(state.warnings ? 6500 : 3200, 6800 - (performance.now() - this.startedAt)));
+      if (state.speaking) {
+        // Der Startbildschirm bleibt, bis Jarvis das Briefing zu Ende gesprochen hat.
+        clearTimeout(this.timer);
+        this.timer = null;
+        this.spoke = true;
+      } else if (!this.timer && !window.JARVIS_PREVIEW) {
+        // The demo stays reviewable and can be replayed. Live operation returns to the chat.
+        this.timer = setTimeout(function () {
+          this.hide(); this.chip.classList.add('hidden'); this.timer = null;
+        }.bind(this), this.spoke ? 2500 : Math.max(state.warnings ? 6500 : 3200, 6800 - (performance.now() - this.startedAt)));
+      }
     }
   };
   window.JarvisStartup = Startup;

@@ -42,8 +42,11 @@
       <div id="dashboard" class="hidden"></div>
 
       <div id="inputrow">
+        <div id="attach" class="hidden"><img id="attach-img" alt=""><button id="attach-x" title="Bild entfernen">✕</button></div>
         <input id="input" type="text" autocomplete="off" spellcheck="false"
-               placeholder="Befehl eingeben, Sir …">
+               placeholder="Befehl eingeben, Sir … (Bild: einfügen oder hineinziehen)">
+        <input id="file-img" type="file" accept="image/*" hidden>
+        <button id="btn-img" class="ctl-btn" title="Bild anhängen (auch ⌘V oder hineinziehen)">⧉</button>
         <button id="btn-stop" class="ctl-btn stop hidden" title="Laufende Aktion abbrechen">■</button>
         <button id="btn-7b" class="ctl-btn" title="Schwerlast-Spur (7B) für die nächste Anfrage">7B</button>
         <button id="btn-mic" class="ctl-btn" disabled

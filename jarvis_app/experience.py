@@ -11,6 +11,7 @@ import queue
 import threading
 import time
 import uuid
+import webbrowser
 from pathlib import Path
 
 from jarvis_core.background_music import BackgroundMusic
@@ -27,6 +28,8 @@ class Experience:
     SLEEP_SECONDS = 0.8
     WAKE_SECONDS = 1.6
     MUSIC_FALLBACK_S = 25.0     # Puffer über der geschätzten Sprechdauer des Briefings
+    MODEL_LOAD_S = 180.0        # Kaltstart großer Modelle (qwen3.6:35b ≈ 22 GB) je Modell
+    VOICE_WAIT_S = 60.0         # gemeinsamer Start: Daemon lädt noch Whisper/TTS
 
     def __init__(self, host):
         self.host = host
@@ -38,6 +41,7 @@ class Experience:
         self._briefing_speech_id: str | None = None
         self.state = {"mode": "idle", "phase": "idle", "steps": [], "progress": 0}
         cfg = host._cfg.experience
+        self.open_url = webbrowser.open           # austauschbar: Tests öffnen keine echten Fenster
         self.music = BackgroundMusic(cfg.music_volume, cfg.music_duck_volume,
                                      host._cfg.voice.get("output_device"), self._music_changed)
 
@@ -223,6 +227,9 @@ class Experience:
                 return
             self._briefing_speech_id = None
             self.music.stop()
+            if self.state.get("speaking"):
+                self.state["speaking"] = False     # Startbildschirm darf jetzt in den Chat wechseln
+                self._publish()
 
     def _speak(self, lines: list[str], cancel: threading.Event) -> None:
         with self._lock:
@@ -238,6 +245,9 @@ class Experience:
             if not sent:
                 self._briefing_speech_id = None
                 self.music.stop()
+                if self.state.get("speaking"):
+                    self.state["speaking"] = False
+                    self._publish()
                 return
             # Notstopp: meldet die Sprachausgabe das Ende nie (alter Daemon, Absturz), endet der Song trotzdem.
             words = sum(len(line.split()) for line in lines)
@@ -282,19 +292,23 @@ class Experience:
         return "ok", "Lokaler Speicher erreichbar"
 
     def _check_model(self):
-        c = OllamaClient(self.host._cfg.ollama_host, connect_timeout=2, read_timeout=25)
+        c = OllamaClient(self.host._cfg.ollama_host, connect_timeout=2, read_timeout=self.MODEL_LOAD_S)
         if not c.ping():
             return "warn", "Ollama nicht erreichbar"
-        if not c.preload(self.host._cfg.profile.general, self.host._cfg.keep_alive):
+        if not c.preload(self.host._cfg.profile.general, self.host._cfg.keep_alive, self.host._cfg.profile.num_ctx):
             return "warn", "Modell konnte nicht geladen werden"
         quick = self.host._cfg.profile.quick
         if quick and quick != self.host._cfg.profile.general:
-            if not c.preload(quick, self.host._cfg.keep_alive):
+            if not c.preload(quick, self.host._cfg.keep_alive, self.host._cfg.profile.num_ctx):
                 return "warn", "Hauptmodell bereit · Schnellspur nicht verfügbar"
             return "ok", f"{self.host._cfg.profile.general} · Schnellspur bereit"
         return "ok", self.host._cfg.profile.general
 
-    def _check_voice(self):
+    def _check_voice(self, cancel):
+        end = time.monotonic() + self.VOICE_WAIT_S
+        while not self.host._hub.connected and time.monotonic() < end:
+            if cancel.wait(0.25):
+                return "skip", "Abgebrochen"
         if self.host._hub.connected:
             return "ok", "Sprach-Daemon verbunden"
         return "warn", "Noch nicht verbunden · Bericht im Panel"
@@ -305,7 +319,7 @@ class Experience:
         plan = [("core", "Oberfläche", lambda: ("ok", "Overlay verbunden")),
                 ("memory", "Gedächtnis", self._check_memory),
                 ("model", "Intelligenz", self._check_model),
-                ("voice", "Stimme", self._check_voice)]
+                ("voice", "Stimme", lambda: self._check_voice(cancel))]
         if mode == "boot":
             path = self.music_path()
             plan.insert(1, ("music", "Soundtrack", lambda: self._start_music(path, cancel)))
@@ -313,14 +327,18 @@ class Experience:
             plan.append(("briefing", "Tagesbriefing", lambda: self.host._ensure_briefing().collect()))
         steps = [{"id": key, "label": label, "state": "pending", "detail": ""} for key, label, _ in plan]
         self._update(cancel, steps=steps)
+        # Der Startbildschirm bleibt, bis die Modelle im Speicher sind; der Soundtrack läuft so lange.
+        timeouts = {"model": 2 * self.MODEL_LOAD_S + 10, "voice": self.VOICE_WAIT_S + 5}
+        loading = {"model": f"{self.host._cfg.profile.general} wird geladen …",
+                   "voice": "Wartet auf den Sprach-Daemon …"}
         for i, (key, _, fn) in enumerate(plan):
             if cancel.is_set():
                 return
-            steps[i] = {**steps[i], "state": "loading", "detail": "Wird geprüft …"}
+            steps[i] = {**steps[i], "state": "loading", "detail": loading.get(key, "Wird geprüft …")}
             if not self._update(cancel, steps=list(steps)):
                 return
             try:
-                result = self._call(fn, cancel, timeout=55 if key == "model" else 30)
+                result = self._call(fn, cancel, timeout=timeouts.get(key, 30))
                 if cancel.is_set():
                     return
                 if key == "briefing":
@@ -350,16 +368,28 @@ class Experience:
         with self._lock:
             if cancel.is_set() or cancel is not self._cancel:
                 return
-            if not self._update(cancel, phase="ready", warnings=sum(s["state"] == "warn" for s in steps)):
-                return
+            speaking = self.host._hub.connected
+            # Briefing-Daten vor „ready“, damit der Startbildschirm die Tagesübersicht sofort zeigt
             if data:
                 self.host._js("jarvis.onBriefing", data)
+            if not self._update(cancel, phase="ready", speaking=speaking,
+                                warnings=sum(s["state"] == "warn" for s in steps)):
+                return
             self.host._js("jarvis.onNotice", "\n".join(lines))
-            if self.host._hub.connected:
+            if speaking:
                 self._speak(lines, cancel)
             else:
                 self._pending_speech = lines
                 self.music.stop()
+        if mode == "boot" and self.host._startup_mode != "reboot":
+            threading.Thread(target=self._open_windows, name="jarvis-open-windows", daemon=True).start()
+
+    def _open_windows(self) -> None:
+        for url in self.host._cfg.experience.open_on_start:
+            try:
+                self.open_url(url)
+            except Exception as exc:  # noqa: BLE001 — ein fehlender Browser hält den Start nicht auf
+                log.warning("Startfenster %s nicht geöffnet: %s", url, exc)
 
     def _start_music(self, path, cancel):
         if not path:

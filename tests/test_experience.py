@@ -79,6 +79,9 @@ def xp(tmp_path):
     exp = Experience(host)
     exp.STEP_PAUSE = 0
     exp.SHUTDOWN_SECONDS = .05
+    exp.VOICE_WAIT_S = 0
+    exp.opened = []
+    exp.open_url = exp.opened.append
     exp._check_memory = lambda: ('ok', 'Datenbank erreichbar')
     exp._check_model = lambda: ('ok', 'Testmodell geladen')
     return exp
@@ -106,10 +109,11 @@ def test_visible_startup_keeps_quick_model_warmup(xp, monkeypatch):
     loaded = []
     xp.host._cfg = replace(xp.host._cfg, profile=replace(xp.host._cfg.profile, quick='quick-model'))
     monkeypatch.setattr('jarvis_app.experience.OllamaClient', lambda *a, **k: SimpleNamespace(
-        ping=lambda: True, preload=lambda model, keep: (loaded.append(model) or True)))
+        ping=lambda: True, preload=lambda model, keep, num_ctx=None: (loaded.append((model, num_ctx)) or True)))
     status, _ = Experience._check_model(xp)
     assert status == 'ok'
-    assert loaded == [xp.host._cfg.profile.general, 'quick-model']
+    ctx = xp.host._cfg.profile.num_ctx           # gleicher Kontext wie der Chat ⇒ kein Neuladen
+    assert loaded == [(xp.host._cfg.profile.general, ctx), ('quick-model', ctx)]
 
 
 def test_one_sequence_at_a_time_and_no_stale_briefing_after_sleep(xp):
@@ -139,6 +143,27 @@ def test_briefing_reaches_late_voice_connection_once(xp):
     count = len(xp.host._hub.spoken)
     xp.voice_connected()
     assert count > 1 and len(xp.host._hub.spoken) == count
+
+
+def test_startup_waits_for_daemon_started_alongside_the_app(xp):
+    xp.VOICE_WAIT_S = 5
+    xp.host._hub.connected = False
+    xp.start('boot')
+    wait_for(lambda: any(s['id'] == 'voice' and s['state'] == 'loading' for s in xp.state['steps']))
+    assert xp.state['phase'] == 'running'
+    xp.host._hub.connected = True
+    wait_for(lambda: xp.state['phase'] == 'ready')
+    assert next(s for s in xp.state['steps'] if s['id'] == 'voice')['state'] == 'ok'
+
+
+def test_cancel_ends_the_daemon_wait_immediately(xp):
+    xp.VOICE_WAIT_S = 30
+    xp.host._hub.connected = False
+    xp.start('boot')
+    wait_for(lambda: any(s['id'] == 'voice' and s['state'] == 'loading' for s in xp.state['steps']))
+    started = time.monotonic()
+    xp.cancel()
+    assert xp.state['phase'] == 'cancelled' and time.monotonic() - started < 1.5
 
 
 def test_cancel_discards_pending_speech(xp):
@@ -380,3 +405,43 @@ def test_briefing_completion_id_is_on_the_last_line_only(xp):
 ])
 def test_lifecycle_tolerates_speech_recognition_variants(text, expected):
     assert lifecycle_command(text) == expected
+
+
+def test_startup_screen_stays_until_briefing_is_spoken(xp):
+    xp.start('boot')
+    wait_for(lambda: bool(xp.host._hub.completions))
+    assert xp.state['phase'] == 'ready' and xp.state['speaking']
+    xp.speech_finished(xp.host._hub.completions[-1])
+    assert not xp.state['speaking']
+    published = [args[0] for name, args in xp.host.events if name == 'jarvis.onExperience']
+    assert published[-1]['speaking'] is False
+
+
+def test_briefing_data_reaches_the_ui_before_ready(xp):
+    xp.start('boot')
+    wait_for(lambda: xp.state['phase'] == 'ready')
+    names = [name for name, args in xp.host.events
+             if name == 'jarvis.onBriefing' or (name == 'jarvis.onExperience' and args[0]['phase'] == 'ready')]
+    assert names[0] == 'jarvis.onBriefing'
+
+
+def test_start_windows_open_on_boot_but_not_after_reboot(xp):
+    urls = xp.host._cfg.experience.open_on_start
+    assert urls, 'config.yaml sollte Startlinks enthalten'
+    xp.start('boot')
+    wait_for(lambda: len(xp.opened) == len(urls))
+    assert xp.opened == list(urls)
+    xp.opened.clear()
+    xp.host._startup_mode = 'reboot'
+    xp.start('boot')
+    wait_for(lambda: xp.state['phase'] == 'ready')
+    time.sleep(0.1)
+    assert xp.opened == []
+
+
+def test_config_only_accepts_web_links_to_open(tmp_path):
+    path = tmp_path / 'config.yaml'
+    path.write_text(open('config.yaml', encoding='utf-8').read().replace(
+        '    - "https://calendar.google.com/calendar/r/day"',
+        '    - "https://calendar.google.com/calendar/r/day"\n    - "file:///etc/passwd"'), encoding='utf-8')
+    assert all(u.startswith('https://') for u in load(str(path)).experience.open_on_start)

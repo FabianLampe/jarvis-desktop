@@ -122,3 +122,10 @@ def test_unload_and_preload_payloads(server):
     preload_req = FakeOllama.requests_seen[1]
     assert unload_req["keep_alive"] == 0 and unload_req["messages"] == []
     assert preload_req["keep_alive"] == "30m" and preload_req["messages"] == []
+
+
+def test_preload_uses_the_chat_context_size(server):
+    # Abweichender Kontext ⇒ Ollama lädt beim ersten echten Chat neu und verdrängt andere Modelle
+    client = OllamaClient(server)
+    assert client.preload("qwen2.5:7b", keep_alive="30m", num_ctx=8192)
+    assert FakeOllama.requests_seen[-1]["options"] == {"num_ctx": 8192}

@@ -45,9 +45,23 @@
     return { el: el, text: text };
   }
 
-  function addUserMsg(content) {
+  function addUserMsg(content, imageUrl) {
     var m = addMsg('SIR', 'user');
     m.text.textContent = content;
+    if (imageUrl) {
+      var im = document.createElement('img');
+      im.className = 'thumb';
+      im.src = imageUrl;
+      m.text.appendChild(im);
+    }
+  }
+
+  function addError(message) {
+    var m = addMsg('J.A.R.V.I.S.', 'jarvis');
+    var e = document.createElement('div');
+    e.className = 'err';
+    e.textContent = message;
+    m.text.appendChild(e);
   }
 
   function esc(t) {
@@ -174,6 +188,7 @@
   function addConfirm(ev) {
     var c = document.createElement('div');
     c.className = 'confirm';
+    c.dataset.id = ev.id;
     var h = document.createElement('div');
     h.className = 'confirm-title';
     h.textContent = 'BESTÄTIGUNG ERFORDERLICH';
@@ -194,6 +209,11 @@
     }
     yes.addEventListener('click', function () { decide(true); });
     no.addEventListener('click', function () { decide(false); });
+    c.resolved = function (ok) {                     // per Stimme entschieden: Karte nur noch anzeigen
+      yes.disabled = no.disabled = true;
+      c.classList.add(ok ? 'approved' : 'declined');
+      h.textContent = (ok ? 'BESTÄTIGT' : 'ABGELEHNT') + ' (STIMME)';
+    };
     row.appendChild(yes); row.appendChild(no);
     c.appendChild(h); c.appendChild(body); c.appendChild(row);
     log.appendChild(c);
@@ -354,6 +374,10 @@
                     ok === false ? 'bad' : ok === true ? 'good' : '');
     },
     onConfirm: function (ev) { addConfirm(ev); },
+    onConfirmResolved: function (id, ok) {
+      var card = document.querySelector('.confirm[data-id="' + CSS.escape(String(id)) + '"]');
+      if (card && card.resolved) card.resolved(ok);
+    },
     onNotice: function (text) { addSystemLine(text); },
     onNewChat: function () { clearChat(); },
     onTasks: function (list) { showTasks(list); },
@@ -366,6 +390,7 @@
       captionMsg = null; // neue Sprachfrage → nächste Caption beginnt frische Antwort
     },
     onCaption: function (text, seconds) {
+      if (startup) startup.caption(text);
       // Sprach-Antwort: jede Sentence wird genau dann getippt, wenn Jarvis sie spricht
       if (!captionMsg) {
         captionMsg = addMsg('J.A.R.V.I.S.', 'jarvis');
@@ -385,6 +410,7 @@
       typerPush(captionMsg.typer, sep + text, seconds);
     },
     onBriefing: function (data) {
+      if (startup) startup.briefing(data);
       var d = $('dashboard');
       d.innerHTML = '';
       d.appendChild(card('LAGE', [esc(data.datetime || '')]));
@@ -414,10 +440,39 @@
 
   // ------------------------------------------------------- UI → Bridge
 
+  // Angehängtes Bild: liegt bereits im Arbeitsordner (Bilder/…), die Nachricht verweist darauf.
+  var pendingImage = null;   // {rel, url}
+
+  function attachFile(file) {
+    if (!file || !api || !/^image\//.test(file.type)) return;
+    if (file.size > 15 * 1024 * 1024) { addError('Das Bild ist größer als 15 MB, Sir.'); return; }
+    var reader = new FileReader();
+    reader.onload = function () {
+      var url = reader.result;
+      api.attach_image(url, file.name || '').then(function (r) {
+        if (!r || !r.ok) { addError((r && r.error) || 'Bild konnte nicht angehängt werden.'); return; }
+        pendingImage = { rel: r.rel, url: url };
+        $('attach-img').src = url;
+        $('attach').classList.remove('hidden');
+        input.focus();
+      });
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function clearAttachment() {
+    pendingImage = null;
+    $('attach').classList.add('hidden');
+    $('attach-img').removeAttribute('src');
+  }
+
   function send() {
     var text = input.value.trim();
-    if (!text || busy || !api) return;
-    addUserMsg(text);
+    var img = pendingImage;
+    if ((!text && !img) || busy || !api) return;
+    if (img && !text) text = 'Was siehst du auf diesem Bild?';
+    addUserMsg(text, img && img.url);
+    if (img) { text += ' [Bild angehängt: ' + img.rel + ']'; clearAttachment(); }
     input.value = '';
     setBusy(true);
     var f = force7b;
@@ -535,6 +590,35 @@
       if (e.key === 'Escape') togglePanel();
     });
     $('btn-7b').addEventListener('click', function () { setForce7b(!force7b); });
+    $('btn-img').addEventListener('click', function () { $('file-img').click(); });
+    $('file-img').addEventListener('change', function () {
+      if (this.files && this.files[0]) attachFile(this.files[0]);
+      this.value = '';
+    });
+    $('attach-x').addEventListener('click', clearAttachment);
+    input.addEventListener('paste', function (e) {
+      var items = (e.clipboardData && e.clipboardData.items) || [];
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].kind === 'file' && /^image\//.test(items[i].type)) {
+          e.preventDefault();
+          attachFile(items[i].getAsFile());
+          return;
+        }
+      }
+    });
+    var panelEl = $('panel');
+    panelEl.addEventListener('dragover', function (e) {
+      if (e.dataTransfer && Array.prototype.indexOf.call(e.dataTransfer.types || [], 'Files') >= 0) {
+        e.preventDefault();
+        panelEl.classList.add('dropping');
+      }
+    });
+    panelEl.addEventListener('dragleave', function () { panelEl.classList.remove('dropping'); });
+    panelEl.addEventListener('drop', function (e) {
+      panelEl.classList.remove('dropping');
+      var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) { e.preventDefault(); attachFile(f); }
+    });
     $('btn-newchat').addEventListener('click', function () {
       if (!api) return;
       api.new_chat().then(function (r) { clearChat(); if (r && r.context) showContext(r.context); });

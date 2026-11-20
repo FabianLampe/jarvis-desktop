@@ -321,3 +321,15 @@ body.bg-dark {
 #tasks .trow .tx { background: none; border: 1px solid rgba(224,137,72,.5); color: #e08948; cursor: pointer; font-size: 12px; padding: 0 6px; }
 #tasks .trow .pulse { width: 6px; height: 6px; background: var(--gold); border-radius: 50%; animation: tp 1s infinite; }
 @keyframes tp { 50% { opacity: .25; } }
+
+/* Angehängtes Bild im Eingabefeld und im Verlauf */
+#attach { position: relative; flex: 0 0 auto; }
+#attach img { height: 34px; max-width: 60px; object-fit: cover; border: 1px solid rgba(230, 160, 70, .5); display: block; }
+#attach-x {
+  position: absolute; top: -7px; right: -7px; width: 16px; height: 16px; padding: 0; line-height: 14px;
+  font-size: 10px; border-radius: 50%; border: 1px solid rgba(230, 160, 70, .6);
+  background: #120d08; color: var(--gold); cursor: pointer;
+}
+.msg .text img.thumb { display: block; margin: 6px 0 2px auto; max-width: 220px; max-height: 160px;
+  border: 1px solid rgba(230, 160, 70, .4); }
+#panel.dropping { outline: 1px dashed var(--gold); outline-offset: -6px; }

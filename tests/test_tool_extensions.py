@@ -226,6 +226,7 @@ def test_workflow_stops_at_failure_and_obeys_shared_step_budget(tmp_path):
 
 def test_native_ui_is_optional_and_actions_require_confirmation(tmp_path):
     rt = runtime(tmp_path)
+    configure(rt, mac_ui={"enabled": False})       # config.yaml schaltet es ein; hier der Ausgangszustand „aus“
     assert not execute(rt, "mac_ui_snapshot").ok
     configure(rt, mac_ui={"enabled": True})
     class FakeUI:
@@ -361,3 +362,30 @@ def test_setup_status_reports_configuration_without_connecting(tmp_path):
     cfg = configure(rt, ssh={"enabled": True, "hosts": {"pi": {"hostname": "pi.local", "user": "test"}}})
     text = "\n".join(status_lines(cfg))
     assert "Verbindung nicht geprüft" in text and "pi" in text and "MCP: deaktiviert" in text
+
+
+def test_declined_action_after_read_only_step_is_friendly(tmp_path, monkeypatch):
+    from jarvis_core.tools import mac_script as ms
+    monkeypatch.setattr(ms, "_spawn", lambda argv, timeout, stdin_text=None:
+                        (0, "Fokus\n", "") if argv[:2] == ["shortcuts", "list"] else (_ for _ in ()).throw(AssertionError(argv)))
+    rt = runtime(tmp_path, {"tool_calls": [call("shortcuts_list")]}, {"tool_calls": [call("shortcut_run", name="Fokus")]},
+                 {"content": "ok"})
+    from tests.tools_helpers import run
+    done = run(rt, "Führe den Kurzbefehl Fokus aus", answer=lambda ev: False)[-1]
+    assert not done["ok"] and "nicht ausgeführt" in done["text"] and "teilweise" not in done["text"].lower()
+
+
+def test_declined_after_a_change_stays_partial(tmp_path):
+    rt = runtime(tmp_path)
+    outcomes = [{"tool": "make_dir", "ok": True, "text": "ok"},
+                {"tool": "delete_path", "ok": False, "text": "abgelehnt", "declined": True, "final": True}]
+    done = rt.agent.compose(outcomes, [], "")
+    assert "Nur teilweise erledigt" in done["text"] and "make_dir" in done["text"]
+
+
+def test_optional_tool_args_say_not_to_ask(tmp_path):
+    rt = runtime(tmp_path)
+    for name in ("camera_watch_start", "music_control", "project_create", "image_generate"):
+        assert "nicht nachfragen" in rt.registry.get(name).description.lower(), name
+    assert "required" in rt.registry.get("camera_watch_start").spec()["function"]["parameters"]
+    assert rt.registry.get("camera_watch_start").spec()["function"]["parameters"]["required"] == []

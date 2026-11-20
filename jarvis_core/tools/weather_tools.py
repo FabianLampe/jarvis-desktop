@@ -33,6 +33,43 @@ def _geocode(place: str) -> tuple[float, float, str]:
     return float(x["latitude"]), float(x["longitude"]), x.get("name", place)
 
 
+def clothing_advice(tmin: float, tmax: float, rain_pct, mm, wind: float, code: int, when: str = "heute") -> str:
+    """Deterministischer Rat aus den Vorhersagewerten (keine Modellmeinung): Kleidung, Schirm, Wind, Hitze."""
+    parts: list[str] = []
+    warm = tmax
+    if warm <= 0:
+        parts.append("Winterjacke, Mütze und Handschuhe")
+    elif warm <= 8:
+        parts.append("eine dicke Jacke mit Schal")
+    elif warm <= 14:
+        parts.append("eine Jacke")
+    elif warm <= 19:
+        parts.append("eine leichte Jacke oder einen Pullover")
+    elif warm <= 25:
+        parts.append("leichte Kleidung" + (", abends eine dünne Jacke" if tmin <= 12 else ""))
+    else:
+        parts.append("leichte, luftige Kleidung")
+        if code in (0, 1, 2):
+            parts.append("Sonnenschutz")
+    if warm >= 30:
+        parts.append("genug Wasser")
+    wet = (rain_pct or 0) >= 50 or (mm or 0) >= 1.0 or code in (61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99)
+    if code in (71, 73, 75, 77, 85, 86):
+        parts.append("wasserfeste Schuhe wegen Schnee")
+    elif wet:
+        parts.append("einen Schirm oder eine Regenjacke")
+    elif (rain_pct or 0) >= 30:
+        parts.append("einen Schirm griffbereit")
+    if wind >= 40:
+        parts.append("etwas Windfestes")
+    jacket = parts[0]
+    rest = parts[1:]
+    text = f"Mein Rat für {when}, Sir: {jacket}" + ("".join(f", {p}" for p in rest[:-1]) + (f" und {rest[-1]}" if rest else "")) + "."
+    if code in (95, 96, 99):
+        text += " Bei Gewitter besser nicht draußen aufhalten."
+    return text
+
+
 def weather(ctx: ToolContext, a: dict) -> ToolResult:
     b = ctx.cfg.briefing
     place = str(a.get("place") or "").strip()
@@ -64,7 +101,10 @@ def weather(ctx: ToolContext, a: dict) -> ToolResult:
     if day == 0 and d.get("current"):
         parts.append(f"aktuell {round(d['current']['temperature_2m'])} Grad")
     text = ", ".join(parts) + "."
-    if rain is not None and rain >= 50:
+    if a.get("advice"):
+        text += " " + clothing_advice(float(dl["temperature_2m_min"][day]), float(dl["temperature_2m_max"][day]),
+                                       rain, mm, float(dl["wind_speed_10m_max"][day]), code, when)
+    elif rain is not None and rain >= 50:
         text += " Ein Schirm wäre ratsam."
     return ToolResult(True, text, {"place": name, "day": when})
 
@@ -74,5 +114,7 @@ def tools() -> list[Tool]:
     return [Tool("weather", "weather",
                  "Wettervorhersage für heute, morgen oder übermorgen (Open-Meteo). Ohne place: Heimatort.",
                  {"place": {**S, "description": "Ort, z. B. Berlin (leer = Heimatort)"},
-                  "when": {**S, "enum": ["heute", "morgen", "übermorgen"]}}, (), weather,
+                  "when": {**S, "enum": ["heute", "morgen", "übermorgen"]},
+                  "advice": {"type": "boolean", "description": "true bei „Brauche ich eine Jacke/einen Schirm?“, „Was soll ich anziehen?“: hängt einen Kleidungsrat an"}},
+                 (), weather,
                  announce=lambda a: f"Ich sehe nach dem Wetter{' in ' + a['place'] if a.get('place') else ''}, Sir.")]

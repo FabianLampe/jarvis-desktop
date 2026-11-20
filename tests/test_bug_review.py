@@ -339,7 +339,7 @@ def test_cancelled_heavy_chat_does_not_reload_models():
     loaded = []
     class Client:
         def unload(self, model): pass
-        def preload(self, model, keep_alive): loaded.append(model)
+        def preload(self, model, keep_alive, num_ctx=None): loaded.append(model)
         def chat_stream(self, *a, **kw):
             chat.reset()
             yield {"token": "old"}
@@ -356,3 +356,11 @@ def test_cancelled_heavy_chat_does_not_reload_models():
     ("Wie wird das Wetter und wie spät ist es", "system")])
 def test_common_german_phrasings_expose_the_required_tools(prompt, group):
     assert group in select_groups(prompt)
+
+
+def test_tool_stream_reports_its_model_to_the_status_bar(tmp_path):
+    from tests.test_bridge_tools import make
+    b = make(tmp_path, {"content": "Erledigt, Sir."})
+    b._last_model = "quick-model"                    # vorherige Antwort lief über die Schnellspur
+    b._run_tool_stream("s1", "Erstelle eine Datei", False, False)
+    assert b._last_model == b._cfg.profile.agent_model

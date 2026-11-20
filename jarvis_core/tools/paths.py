@@ -55,3 +55,20 @@ def is_protected(ctx: ToolContext, p: Path) -> bool:
         if target == root or target.startswith(root.rstrip(os.sep) + os.sep):
             return True
     return False
+
+
+def venv_python(root: Path) -> Path | None:
+    """Python der Projekt-.venv (bewusst NICHT aufgelöst: der Link in die Basisinstallation würde die venv verlieren)."""
+    cand = Path(root) / ".venv" / "bin" / "python"
+    return cand if cand.exists() else None
+
+
+def find_project_python(script: Path, levels: int = 6) -> Path | None:
+    """Liegt das Skript in einem Projekt mit .venv (in einem der übergeordneten Ordner), dessen Python."""
+    home = Path.home()
+    for parent in list(Path(script).parents)[:levels]:
+        if parent == home or parent == parent.parent:
+            break
+        if (py := venv_python(parent)) is not None:
+            return py
+    return None

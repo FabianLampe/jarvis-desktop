@@ -51,8 +51,8 @@ Everything is installed into `.venv` only; no system upgrades. First use of docu
 macOS:
 
 ```sh
-./start_jarvis_mac.sh               # desktop app (profile auto = mac)
-./start_jarvis_mac.sh --daemon      # voice daemon (second terminal)
+./start_jarvis_mac.sh               # desktop app + voice daemon (profile auto = mac)
+./start_jarvis_mac.sh --daemon      # voice daemon only (the default start already launches it)
 ./start_jarvis_mac.sh --cli "Lege einen Ordner Test an"   # no GUI, confirmations asked in the terminal
 ./start_jarvis_mac.sh --check       # environment + model check
 ```

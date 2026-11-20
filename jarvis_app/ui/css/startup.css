@@ -78,6 +78,23 @@
 .is-warn { color: #f0bd78; border-left-color: #ffb557; }
 .is-warn .step-mark { color: #ffb557; }
 .is-skip { color: #7f929a; }
+#startup-agenda { display: none; grid-template-columns: 1.6fr 1fr 1fr; gap: 10px 12px; }
+.startup-briefing #startup-steps { display: none; }
+.startup-briefing #startup-agenda { display: grid; }
+.agenda-card { display: flex; flex-direction: column; gap: 5px; min-height: 96px; padding: 10px 12px;
+  border: 1px solid #98784929; border-left: 2px solid #e6b66f; background: #17140e85;
+  animation: hud-module-in .6s var(--card-delay, 0s) both; }
+.agenda-card strong { font: 30px 'Rajdhani', sans-serif; font-weight: 500; color: #f2d7ad; line-height: 1; }
+.agenda-card > span:not(.hud-label) { font-size: 12px; color: #b7aa92; }
+.agenda-event { display: flex; gap: 10px; align-items: baseline; font-size: 13px; color: #e6d3b2;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.agenda-event b { flex: 0 0 auto; min-width: 42px; font: 12px 'Rajdhani', sans-serif; font-weight: 600;
+  letter-spacing: 1px; color: #9cf2e7; }
+.agenda-event span { overflow: hidden; text-overflow: ellipsis; }
+.agenda-card .agenda-empty { color: #7195a1; font-size: 11px; letter-spacing: .5px; }
+#startup-title.is-caption { color: #f1dfbf; max-width: 760px; margin-left: auto; margin-right: auto;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  animation: hud-heading-in .45s both; }
 #startup-footer { margin-top: 9px; color: #608c99; font-size: 8px; letter-spacing: 1.5px; }
 .startup-foot { position: relative; display: flex; justify-content: space-between; align-items: center;
   gap: 16px; padding: 13px 30px 20px; border-top: 1px solid #609fac21; flex: 0 0 auto; }
@@ -143,6 +160,8 @@
   .hud-wing { display: none; }
   .startup-console { padding: 12px 20px; }
   #startup-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 175px; }
+  #startup-agenda { grid-template-columns: 1fr 1fr; }
+  .agenda-card:first-child { grid-column: 1 / -1; min-height: 0; }
   .startup-progress-head { font-size: 8px; letter-spacing: 1px; }
   .startup-progress-head b { font-size: 22px; }
   .startup-foot { padding: 12px 20px 16px; flex-wrap: wrap; gap: 9px; }

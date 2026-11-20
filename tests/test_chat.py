@@ -36,7 +36,7 @@ class FakeClient:
         self.calls.append(("unload", model))
         return True
 
-    def preload(self, model, keep_alive="30m"):
+    def preload(self, model, keep_alive="30m", num_ctx=None):
         self.calls.append(("preload", model, keep_alive))
         return True
 

@@ -113,6 +113,12 @@ class ToolsConfig:
     max_output_chars: int = 6000          # je Strom (stdout/stderr) an das Modell
     confirm_ttl_s: float = 120.0          # Bestätigung verfällt danach
     data_dir: Optional[str] = None        # SQLite/Chroma; None ⇒ Plattform-Standard
+    router: str = "keywords"              # auto = ohne Stichworttreffer wählt das Modell die Werkzeuge
+    editor: str = "Visual Studio Code"    # Standard-Editor für open_in_editor
+
+    def __post_init__(self):
+        if self.router not in ("auto", "keywords"):
+            raise ConfigError("tools.router muss auto|keywords sein")
 
 
 @dataclass(frozen=True)
@@ -133,7 +139,64 @@ class RemindersConfig:
 class ResearchConfig:
     searxng_url: Optional[str] = None     # optional; sonst DuckDuckGo-HTML
     max_sources: int = 4
-    max_chars_per_source: int = 3000
+    max_chars_per_source: int = 4500
+    only_trusted: bool = False            # true = ausschließlich etablierte Quellen lesen
+    trusted_domains: tuple[str, ...] = () # eigene Ergänzungen zur eingebauten Liste
+    blocked_domains: tuple[str, ...] = () # werden nie gelesen
+
+
+@dataclass(frozen=True)
+class NetworkConfig:
+    vendor_lookup: bool = True            # Herstellerliste (IEEE-OUI) einmalig laden und lokal cachen
+
+
+@dataclass(frozen=True)
+class ProactiveConfig:
+    """Wächter: Jarvis meldet sich von selbst (jarvis_core/proactive.py)."""
+    enabled: bool = False
+    interval_min: int = 15                # Netz, Platte, Akku; Termine werden jede Minute geprüft
+    new_devices: bool = True
+    calendar: bool = True
+    calendar_lead_min: int = 15
+    disk: bool = True
+    disk_warn_pct: int = 90
+    battery: bool = True
+    battery_warn_pct: int = 15
+
+    def __post_init__(self):
+        if not 1 <= self.interval_min <= 1440 or not 1 <= self.calendar_lead_min <= 240:
+            raise ConfigError("proactive: interval_min 1–1440, calendar_lead_min 1–240")
+        if not 50 <= self.disk_warn_pct <= 99 or not 1 <= self.battery_warn_pct <= 50:
+            raise ConfigError("proactive: disk_warn_pct 50–99, battery_warn_pct 1–50")
+
+
+@dataclass(frozen=True)
+class ShortcutsConfig:
+    """Apple Kurzbefehle: nur Namen in `allowed` laufen ohne Rückfrage (und nur, wenn kein Fremdinhalt gelesen wurde)."""
+    allowed: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ImageGenConfig:
+    """Bilder erzeugen (mflux, Apple Silicon). Aus, bis Sir die Modellgewichte bewusst geladen hat."""
+    enabled: bool = False
+    model: str = "schnell"
+    quantize: int = 4
+    steps: int = 4
+    command: Optional[str] = None         # Pfad zu mflux-generate; None ⇒ .venv-mflux, .venv, PATH
+
+    def __post_init__(self):
+        if self.quantize not in (3, 4, 5, 6, 8):
+            raise ConfigError("image_generation.quantize muss 3, 4, 5, 6 oder 8 sein")
+        if not 1 <= self.steps <= 50:
+            raise ConfigError("image_generation.steps muss zwischen 1 und 50 liegen")
+        if not self.model or self.model.startswith("-"):
+            raise ConfigError("image_generation.model ungültig")
+
+
+@dataclass(frozen=True)
+class MemoryConfig:
+    auto_learn: bool = True               # Aussagen wie „ich heiße …“ / „ich wohne in …“ selbst merken
 
 
 @dataclass(frozen=True)
@@ -143,6 +206,7 @@ class ExperienceConfig:
     music_file: Optional[str] = None
     music_volume: float = 0.28
     music_duck_volume: float = 0.07
+    open_on_start: tuple[str, ...] = ()     # http(s)-Links, die nach dem Systemstart im Browser aufgehen
 
 
 @dataclass(frozen=True)
@@ -181,6 +245,11 @@ class AppConfig:
     window_bg: str = "dark"  # dark | transparent
     reasoning: ReasoningConfig = field(default_factory=ReasoningConfig)
     extensions: dict[str, Any] = field(default_factory=dict)
+    network: NetworkConfig = field(default_factory=NetworkConfig)
+    proactive: ProactiveConfig = field(default_factory=ProactiveConfig)
+    shortcuts: ShortcutsConfig = field(default_factory=ShortcutsConfig)
+    image_generation: ImageGenConfig = field(default_factory=ImageGenConfig)
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
 
 class ConfigError(ValueError):
@@ -254,6 +323,43 @@ DEFAULT_BRIEFING: dict[str, Any] = {
 }
 
 
+def _proactive(p: dict) -> "ProactiveConfig":
+    d = ProactiveConfig()
+    return ProactiveConfig(
+        enabled=bool(p.get("enabled", d.enabled)), interval_min=int(p.get("interval_min", d.interval_min)),
+        new_devices=bool(p.get("new_devices", d.new_devices)), calendar=bool(p.get("calendar", d.calendar)),
+        calendar_lead_min=int(p.get("calendar_lead_min", d.calendar_lead_min)),
+        disk=bool(p.get("disk", d.disk)), disk_warn_pct=int(p.get("disk_warn_pct", d.disk_warn_pct)),
+        battery=bool(p.get("battery", d.battery)), battery_warn_pct=int(p.get("battery_warn_pct", d.battery_warn_pct)))
+
+
+def _shortcuts(raw) -> "ShortcutsConfig":
+    raw = raw or {}
+    allowed = raw.get("allowed") or ()
+    if isinstance(allowed, str) or not isinstance(allowed, (list, tuple)):
+        raise ConfigError("shortcuts.allowed muss eine Liste von Kurzbefehl-Namen sein")
+    return ShortcutsConfig(allowed=tuple(str(n) for n in allowed if str(n).strip()))
+
+
+def _image_generation(raw) -> "ImageGenConfig":
+    raw = raw or {}
+    d = ImageGenConfig()
+    return ImageGenConfig(
+        enabled=bool(raw.get("enabled", d.enabled)), model=str(raw.get("model", d.model)),
+        quantize=int(raw.get("quantize", d.quantize)), steps=int(raw.get("steps", d.steps)),
+        command=raw.get("command") or None)
+
+
+def _domains(raw) -> tuple[str, ...]:
+    """Domainliste aus YAML: klein geschrieben, ohne Schema, „www.“ und Pfad."""
+    out = []
+    for d in raw or ():
+        d = str(d).strip().lower().split("://")[-1].split("/")[0].removeprefix("www.")
+        if d:
+            out.append(d)
+    return tuple(out)
+
+
 def load(path: str | Path | None = None,
          profile_override: str | None = None) -> AppConfig:
     """Lädt config.yaml; fehlende Werte werden mit sinnvollen Defaults gefüllt."""
@@ -301,7 +407,8 @@ def load(path: str | Path | None = None,
         max_timeout_s=float(t.get("max_timeout_s", 600)),
         max_output_chars=int(t.get("max_output_chars", 6000)),
         confirm_ttl_s=float(t.get("confirm_ttl_s", 120)),
-        data_dir=t.get("data_dir"))
+        data_dir=t.get("data_dir"), router=str(t.get("router", "keywords")).lower(),
+        editor=str(t.get("editor") or "Visual Studio Code"))
     k = raw.get("knowledge") or {}
     kd = KnowledgeConfig()
     knowledge = KnowledgeConfig(
@@ -317,7 +424,10 @@ def load(path: str | Path | None = None,
     research = ResearchConfig(
         searxng_url=rs.get("searxng_url") or None,
         max_sources=int(rs.get("max_sources", 4)),
-        max_chars_per_source=int(rs.get("max_chars_per_source", 3000)))
+        max_chars_per_source=int(rs.get("max_chars_per_source", 4500)),
+        only_trusted=bool(rs.get("only_trusted", False)),
+        trusted_domains=_domains(rs.get("trusted_domains")),
+        blocked_domains=_domains(rs.get("blocked_domains")))
     integrations = {str(n): dict(v or {}) for n, v in (raw.get("integrations") or {}).items()}
     xp = raw.get("experience") or {}
     experience = ExperienceConfig(
@@ -325,7 +435,9 @@ def load(path: str | Path | None = None,
         startup_briefing=bool(xp.get("startup_briefing", True)),
         music_file=xp.get("music_file") or None,
         music_volume=max(0.0, min(1.0, float(xp.get("music_volume", 0.28)))),
-        music_duck_volume=max(0.0, min(1.0, float(xp.get("music_duck_volume", 0.07)))))
+        music_duck_volume=max(0.0, min(1.0, float(xp.get("music_duck_volume", 0.07)))),
+        open_on_start=tuple(str(u) for u in (xp.get("open_on_start") or ())
+                            if str(u).startswith(("https://", "http://"))))
     rr = raw.get("reasoning") or {}
     mode = rr.get("mode", "auto")
     # YAML 1.1 liest unquoted on/off als bool; beide Schreibweisen zulassen.
@@ -370,6 +482,11 @@ def load(path: str | Path | None = None,
         integrations=integrations, experience=experience,
         reasoning=reasoning,
         extensions=extensions,
+        proactive=_proactive(raw.get("proactive") or {}),
+        shortcuts=_shortcuts(raw.get("shortcuts")),
+        image_generation=_image_generation(raw.get("image_generation")),
+        memory=MemoryConfig(auto_learn=bool((raw.get("memory") or {}).get("auto_learn", True))),
+        network=NetworkConfig(vendor_lookup=bool((raw.get("network") or {}).get("vendor_lookup", True))),
         orb=orb,
         voice=voice,
         browser=browser,
